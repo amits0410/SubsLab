@@ -1,0 +1,102 @@
+Metadata-Version: 2.4
+Name: subsgen-studio
+Version: 0.1.0
+Summary: Privacy-first offline subtitle generation and editing
+License: Proprietary
+Requires-Python: <3.14,>=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: PySide6<7,>=6.8
+Requires-Dist: av<17,>=15
+Requires-Dist: numpy<3,>=1.26
+Requires-Dist: huggingface-hub<2,>=0.27
+Provides-Extra: windows-ai
+Requires-Dist: faster-whisper<2,>=1.1; extra == "windows-ai"
+Provides-Extra: mac-ai
+Requires-Dist: mlx-whisper<1,>=0.4; (platform_system == "Darwin" and platform_machine == "arm64") and extra == "mac-ai"
+Requires-Dist: faster-whisper<2,>=1.1; platform_system == "Darwin" and extra == "mac-ai"
+Provides-Extra: test
+Requires-Dist: pytest<9,>=8; extra == "test"
+Requires-Dist: pytest-qt<5,>=4.4; extra == "test"
+Provides-Extra: build
+Requires-Dist: pyinstaller<7,>=6.11; extra == "build"
+
+# SubsGen Studio
+
+SubsGen Studio is a privacy-first desktop subtitle editor and local transcription tool. Audio and video stay on the computer: after an AI model has been downloaded once, transcription, English translation, Hebrew processing, editing, playback, recovery, and SRT export work without a network connection.
+
+## MVP features
+
+- Local Whisper transcription and speech-to-English translation.
+- Mandatory Ivrit-AI routing for Hebrew transcription.
+- Faster-Whisper CPU/CUDA inference on Windows and CPU fallback on macOS.
+- MLX-Whisper acceleration for general models on Apple Silicon.
+- MP4, MOV, M4V, MP3, WAV, and M4A decoding and playback.
+- Segment playback, text editing, splitting, deletion, direct timestamps, and 100 ms nudging.
+- Automatic 50 ms minimum durations, reversed-time repair, and overlap prevention.
+- UTF-8 SRT import/export with automatic Hebrew bidirectional markers.
+- Atomic recovery snapshots that never copy the user's media.
+- Resumable, atomic local model installation and removal.
+
+The first release intentionally excludes denoising, diarization, glossary injection, waveform editing, imported-SRT machine translation, and automatic updates.
+
+## Development setup
+
+Python 3.11–3.13 is supported. Create a virtual environment, then install the platform extra:
+
+```powershell
+py -3.12 -m venv .venv
+.venv\Scripts\python -m pip install --upgrade pip
+.venv\Scripts\python -m pip install -e ".[windows-ai,test,build]"
+.venv\Scripts\subsgen-studio.exe
+```
+
+On an Apple Silicon Mac:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -e '.[mac-ai,test,build]'
+.venv/bin/subsgen-studio
+```
+
+Open **Models** in the application and install the model required for the selected language and task. Model downloads are the only workflow that requires internet access.
+
+For Windows CUDA acceleration, a compatible NVIDIA driver plus the CUDA 12/cuDNN 9 runtime is required. If CUDA cannot initialize, the application reports the fallback and continues with int8 CPU inference. Hebrew on macOS uses the Ivrit-AI CTranslate2 model on CPU; general multilingual transcription uses MLX acceleration.
+
+## Tests
+
+The core tests use only the Python standard library and do not download AI models:
+
+```powershell
+$env:PYTHONPATH="src"
+python -m unittest discover -s tests -v
+```
+
+With the test extra installed, `pytest` can run the same suite. Real-model and hardware smoke tests are intentionally opt-in because model artifacts are large and CUDA/Apple hardware is platform-specific.
+
+## Architecture
+
+- `domain.py` defines the stable segment, request, model, progress, and backend contracts.
+- `timeline.py` owns all timing invariants so the UI and imported data share one policy.
+- `srt.py` keeps directional markers out of editable text and applies them only while exporting Hebrew.
+- `model_store.py` owns capability routing and atomic on-demand model installation.
+- `backends.py`, `media.py`, and `worker.py` isolate optional native AI dependencies and run inference outside the UI process.
+- `ui.py` contains the PySide6 application shell, media player, subtitle cards, model manager, save flows, and recovery lifecycle.
+
+Application data follows the operating system's standard per-user application-data location. Model folders and the single recovery snapshot live there; media is referenced by path and never copied.
+
+## Packaging
+
+Build the Windows application directory with:
+
+```powershell
+.\scripts\build.ps1
+```
+
+The script intentionally fails unless the `windows-ai` extra is installed, preventing a release that opens but cannot transcribe. Pass `-Installer` when Inno Setup's `iscc` is available. Set `SUBSGEN_SIGN_CERT_SHA1` to sign the executable and installer with `signtool`.
+
+On Apple Silicon, run `scripts/build_macos.sh`. It likewise checks for both the MLX and CTranslate2 runtimes before creating an application bundle and DMG. Set `SUBSGEN_CODESIGN_IDENTITY` for Developer ID signing and `SUBSGEN_NOTARY_PROFILE` for notarization and stapling. Unsigned local development builds need neither variable.
+
+## Privacy boundary
+
+The application has no telemetry, cloud transcription endpoint, login, or media-upload code. The Hugging Face client is imported only by the explicit model-install action. Runtime inference receives a local path and decoded local samples.

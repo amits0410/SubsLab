@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "subsgen-studio"
+version = "0.1.0"
+description = "Privacy-first offline subtitle generation and editing"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = { text = "Proprietary" }
+dependencies = [
+  "PySide6>=6.8,<7",
+  "av>=15,<17",
+  "numpy>=1.26,<3",
+  "huggingface-hub>=0.27,<2",
+]
+
+[project.optional-dependencies]
+windows-ai = ["faster-whisper>=1.1,<2"]
+mac-ai = [
+  "mlx-whisper>=0.4,<1; platform_system == 'Darwin' and platform_machine == 'arm64'",
+  "faster-whisper>=1.1,<2; platform_system == 'Darwin'",
+]
+test = ["pytest>=8,<9", "pytest-qt>=4.4,<5"]
+build = ["pyinstaller>=6.11,<7"]
+
+[project.scripts]
+subsgen-studio = "subsgen.app:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

@@ -1,0 +1,22 @@
+PySide6<7,>=6.8
+av<17,>=15
+numpy<3,>=1.26
+huggingface-hub<2,>=0.27
+
+[build]
+pyinstaller<7,>=6.11
+
+[mac-ai]
+
+[mac-ai:platform_system == "Darwin"]
+faster-whisper<2,>=1.1
+
+[mac-ai:platform_system == "Darwin" and platform_machine == "arm64"]
+mlx-whisper<1,>=0.4
+
+[test]
+pytest<9,>=8
+pytest-qt<5,>=4.4
+
+[windows-ai]
+faster-whisper<2,>=1.1
