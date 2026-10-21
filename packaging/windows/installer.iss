@@ -8,6 +8,11 @@
 AppId={{AA9C9CF0-B910-4DDB-B556-21070A1C62AB}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
+AppPublisher=SubsLab
+AppPublisherURL=https://github.com/amits0410/SubsLab
+AppSupportURL=https://github.com/amits0410/SubsLab/issues
+AppUpdatesURL=https://github.com/amits0410/SubsLab/releases/latest
+WizardStyle=modern
 DefaultDirName={autopf}\SubsLab
 DefaultGroupName=SubsLab
 OutputDir=..\..\dist

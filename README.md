@@ -4,6 +4,16 @@ SubsLab is a privacy-first desktop subtitle editor and local transcription tool.
 
 The application icon is provided in PNG, Windows ICO, and macOS ICNS formats under `assets/`; both development launches and packaged builds use the same branding.
 
+## Install on Windows
+
+Download **[SubsLab-Setup.exe from the latest release](https://github.com/amits0410/SubsLab/releases/latest/download/SubsLab-Setup.exe)**, run the installer, then open **SubsLab** from the Start menu. Supports Windows 10/11 on 64-bit Intel/AMD PCs; Python and a GPU are not required.
+
+On first launch, open **Tools → Local AI models** and install the model you need. This one-time download requires internet; transcription with installed models works offline.
+
+The installer is currently unsigned, so Windows may display an unknown-publisher or SmartScreen warning. Only proceed if you expected the file and trust its source. The release includes a SHA-256 checksum.
+
+See the [Windows installation guide](docs/WINDOWS_INSTALLATION.md) for full instructions. **Code → Download ZIP** and the release's **Source code** downloads contain developer files, not the Windows installer. Apple Silicon Mac users should follow the [macOS guide](docs/MACOS_SETUP_GUIDE.md).
+
 ## Features
 
 - Dark studio workspace with collapsible transcription setup, a full-width waveform, and clear selected/playing cues.
