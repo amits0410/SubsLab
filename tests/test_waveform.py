@@ -39,3 +39,31 @@ def test_waveform_drag_scrubs_continuously(qtbot):
     qtbot.mouseRelease(widget, Qt.MouseButton.LeftButton, pos=QPoint(700, 50))
     assert len(positions) >= 2
     assert abs(positions[-1] - 700) <= 2
+
+
+def test_waveform_background_is_reused_for_playhead_updates(qtbot):
+    widget = WaveformWidget()
+    qtbot.addWidget(widget)
+    widget.resize(600, 100)
+    widget.set_waveform([0.2, 0.8, 0.4], 1000)
+    widget.show()
+    widget.grab()
+    cache = widget._background_cache
+    widget.set_position(500)
+    widget.grab()
+    assert widget._background_cache is cache
+    widget.set_waveform([0.1, 0.3], 1000)
+    widget.grab()
+    assert widget._background_cache is not cache
+
+
+def test_dense_unselected_cue_boundaries_do_not_capture_scrubbing(qtbot):
+    widget = WaveformWidget()
+    qtbot.addWidget(widget)
+    widget.resize(1000, 100)
+    widget.set_waveform([.2, .8], 10000)
+    widget.set_timeline([SubtitleSegment(str(i), i * 100, i * 100 + 80, "Cue") for i in range(100)], 0)
+    widget.show()
+    with qtbot.waitSignal(widget.seekRequested) as seek:
+        qtbot.mouseClick(widget, Qt.MouseButton.LeftButton, pos=QPoint(500, 50))
+    assert seek.args == [5000]

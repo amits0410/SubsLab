@@ -31,6 +31,29 @@ class TimelineTests(unittest.TestCase):
         timeline.update(0, 0, 900, "first")
         self.assertEqual(timeline.segments[0].end_ms, 600)
 
+    def test_edit_cannot_shrink_previous_below_minimum_or_leave_an_overlap(self):
+        timeline = Timeline([segment("a", 0, 1000), segment("b", 1000, 2000)])
+        timeline.update(1, 10, 2000, "manual wording")
+        self._assert_structural(timeline.segments, 2000)
+        self.assertEqual(timeline.segments[0].end_ms, 1000)
+        self.assertEqual(timeline.segments[1].start_ms, 1000)
+
+    def test_initial_ranges_must_fit_media(self):
+        with self.assertRaises(TimelineError):
+            Timeline([segment("a", 0, 2000)], media_duration_ms=1000)
+
+    def test_fuzz_edits_never_introduce_overlap_or_partial_failure(self):
+        generator = random.Random(8675309)
+        for _ in range(200):
+            timeline = Timeline([segment(str(i), i * 500, i * 500 + 400) for i in range(10)], 5000)
+            before = [(item.start_ms, item.end_ms) for item in timeline.segments]
+            index = generator.randrange(10)
+            try:
+                timeline.update(index, generator.randint(-1000, 6000), generator.randint(-1000, 6000), "edited")
+            except TimelineError:
+                self.assertEqual([(item.start_ms, item.end_ms) for item in timeline.segments], before)
+            self._assert_structural(timeline.segments, 5000)
+
     def test_nudge_start(self):
         timeline = Timeline([segment("a", 200, 600)])
         updated = timeline.nudge(0, "start", -100)

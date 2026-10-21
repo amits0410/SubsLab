@@ -3,8 +3,8 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "subsgen-studio"
-version = "0.1.0"
+name = "subslab"
+dynamic = ["version"]
 description = "Privacy-first offline subtitle generation and editing"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
@@ -26,7 +26,11 @@ test = ["pytest>=8,<9", "pytest-qt>=4.4,<5"]
 build = ["pyinstaller>=6.11,<7"]
 
 [project.scripts]
+subslab = "subsgen.app:main"
 subsgen-studio = "subsgen.app:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "subsgen.branding.APP_VERSION" }
 
 [tool.setuptools]
 package-dir = {"" = "src"}

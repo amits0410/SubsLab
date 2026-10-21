@@ -6,7 +6,7 @@ from subsgen.app import application_icon_path, ensure_standard_streams
 
 def test_application_icon_is_available_from_source_tree():
     icon_path = application_icon_path()
-    assert icon_path == Path(__file__).resolve().parents[1] / "assets" / "subsgen-studio.png"
+    assert icon_path == Path(__file__).resolve().parents[1] / "assets" / "subslab.png"
     assert icon_path.is_file()
 
 

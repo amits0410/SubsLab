@@ -44,8 +44,7 @@ def analyze_readability(
             issues[segment.id].append(
                 _issue(segment, "duration_short", f"{duration_s:.1f}s duration (min {settings.min_duration_ms / 1000:g}s)", duration_ms, settings.min_duration_ms)
             )
-        required_for_speed = required_reading_duration_ms(segment, settings, include_minimum=False)
-        if settings.warn_duration and duration_ms > settings.max_duration_ms and required_for_speed <= settings.max_duration_ms:
+        if settings.warn_duration and duration_ms > settings.max_duration_ms:
             issues[segment.id].append(
                 _issue(segment, "duration_long", f"{duration_s:.1f}s duration (max {settings.max_duration_ms / 1000:g}s)", duration_ms, settings.max_duration_ms)
             )

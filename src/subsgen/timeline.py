@@ -115,11 +115,17 @@ class Timeline:
     def _validate_initial(self) -> None:
         self.segments.sort(key=lambda item: (item.start_ms, item.end_ms))
         previous_end = 0
+        seen_ids = set()
         for segment in self.segments:
+            if segment.id in seen_ids:
+                raise TimelineError("Subtitle cue identifiers must be unique")
+            seen_ids.add(segment.id)
             if segment.start_ms < 0 or segment.end_ms - segment.start_ms < MIN_DURATION_MS:
                 raise TimelineError("Subtitle ranges must be nonnegative and at least 50 ms long")
             if segment.start_ms < previous_end:
                 raise TimelineError("Subtitle ranges may not overlap")
+            if self.media_duration_ms is not None and segment.end_ms > self.media_duration_ms:
+                raise TimelineError("Subtitle ranges may not extend beyond the media")
             previous_end = segment.end_ms
 
     def update(self, index: int, start_ms: int, end_ms: int, text: str) -> SubtitleSegment:
@@ -128,25 +134,28 @@ class Timeline:
         start, end = self._normalize_range(start_ms, end_ms)
         previous = self.segments[index - 1] if index else None
         following = self.segments[index + 1] if index + 1 < len(self.segments) else None
+        previous_end = previous.end_ms if previous else 0
 
         if previous and start < previous.end_ms:
             if start - previous.start_ms >= MIN_DURATION_MS:
-                previous.end_ms = start
+                previous_end = start
             else:
-                start = previous.start_ms + MIN_DURATION_MS
+                start = previous.end_ms
                 end = max(end, start + MIN_DURATION_MS)
 
         if following and end > following.start_ms:
             if following.start_ms - start >= MIN_DURATION_MS:
                 end = following.start_ms
             else:
-                start = max(previous.end_ms if previous else 0, following.start_ms - MIN_DURATION_MS)
+                start = max(previous_end, following.start_ms - MIN_DURATION_MS)
                 end = following.start_ms
 
         start, end = self._fit_media(start, end)
-        if end - start < MIN_DURATION_MS:
+        if end - start < MIN_DURATION_MS or start < previous_end or (following and end > following.start_ms):
             raise TimelineError("There is not enough room between adjacent subtitles")
         updated = SubtitleSegment(self.segments[index].id, start, end, text)
+        if previous:
+            previous.end_ms = previous_end
         self.segments[index] = updated
         return updated
 
@@ -161,7 +170,9 @@ class Timeline:
     def _fit_media(self, start: int, end: int) -> tuple[int, int]:
         if self.media_duration_ms is None:
             return start, end
-        duration = max(MIN_DURATION_MS, self.media_duration_ms)
+        duration = self.media_duration_ms
+        if duration < MIN_DURATION_MS:
+            raise TimelineError("The media is shorter than the 50 ms minimum subtitle duration")
         if start >= duration:
             start = duration - MIN_DURATION_MS
         end = min(end, duration)

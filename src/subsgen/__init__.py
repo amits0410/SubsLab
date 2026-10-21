@@ -1,4 +1,4 @@
-"""SubsGen Studio core package."""
+"""SubsLab core package (the module name stays stable for compatibility)."""
 
-__version__ = "0.1.0"
+from .branding import APP_VERSION as __version__
 
