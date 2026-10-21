@@ -7,7 +7,7 @@ if [[ "$(uname -m)" != "arm64" ]]; then
   exit 1
 fi
 python -m PyInstaller --noconfirm --clean SubsLab.spec
-lipo -verify_arch arm64 "dist/SubsLab.app/Contents/MacOS/SubsLab"
+lipo "dist/SubsLab.app/Contents/MacOS/SubsLab" -verify_arch arm64
 test -f "dist/SubsLab.app/Contents/Resources/assets/subslab.png"
 
 sign_identity="${SUBSLAB_CODESIGN_IDENTITY:-${SUBSGEN_CODESIGN_IDENTITY:-}}"
