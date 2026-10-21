@@ -5,11 +5,12 @@ import os
 import sys
 from pathlib import Path
 
+from .branding import APP_NAME, APP_VERSION, ICON_STEM, STORAGE_ORGANIZATION, resource_path
+
 
 def application_icon_path() -> Path:
     """Return the icon location in both source and PyInstaller builds."""
-    bundle_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2]))
-    return bundle_root / "assets" / "subsgen-studio.png"
+    return resource_path(f"{ICON_STEM}.png")
 
 
 def ensure_standard_streams() -> None:
@@ -30,17 +31,21 @@ def main() -> int:
     try:
         from PySide6.QtGui import QIcon
         from PySide6.QtWidgets import QApplication
-    except ImportError:
-        print("PySide6 is not installed. Run: python -m pip install -e .", file=sys.stderr)
+    except ImportError as exc:
+        instruction = "Reinstall the application or rebuild its bundled libraries." if getattr(sys, "frozen", False) else "Run: python -m pip install -e ."
+        print(f"{APP_NAME} could not load its user interface: {exc}\n{instruction}", file=sys.stderr)
         return 2
 
     from .ui import MainWindow
 
     multiprocessing.freeze_support()
     application = QApplication(sys.argv)
-    application.setApplicationName("SubsGen Studio")
-    application.setOrganizationName("SubsGen")
-    application.setStyle("Fusion")
+    application.setApplicationName(APP_NAME)
+    application.setApplicationDisplayName(APP_NAME)
+    application.setApplicationVersion(APP_VERSION)
+    application.setOrganizationName(STORAGE_ORGANIZATION)
+    from .theme import apply_theme
+    apply_theme(application)
     icon_path = application_icon_path()
     if icon_path.is_file():
         application.setWindowIcon(QIcon(str(icon_path)))

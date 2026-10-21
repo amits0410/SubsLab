@@ -1,38 +1,39 @@
-name: Build macOS DMG
+name: Build SubsLab macOS DMG
 
 on:
   workflow_dispatch:
+  push:
+    branches: ["codex/subslab-studio-refresh"]
+
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: macos-15
-
+    timeout-minutes: 30
+    env:
+      QT_QPA_PLATFORM: offscreen
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e '.[mac-ai,test,build]'
-
-      - name: Run tests
+      - name: Test
         run: python -m pytest
-
-      - name: Build unsigned DMG
-        run: |
-          chmod +x scripts/build_macos.sh
-          ./scripts/build_macos.sh
-          shasum -a 256 dist/SubsGen-Studio.dmg > dist/SHA256.txt
-
-      - name: Upload DMG
-        uses: actions/upload-artifact@v4
+      - name: Build and verify Apple Silicon disk image
+        run: bash scripts/build_macos.sh
+      - name: Smoke-test packaged application
+        run: python scripts/smoke_app.py dist/SubsLab.app/Contents/MacOS/SubsLab
+      - uses: actions/upload-artifact@v4
         with:
-          name: SubsGen-Studio-macOS-arm64
+          name: SubsLab-macOS-arm64
           path: |
-            dist/SubsGen-Studio.dmg
+            dist/SubsLab.dmg
             dist/SHA256.txt
+          if-no-files-found: error
           retention-days: 7

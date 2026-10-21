@@ -1,37 +1,28 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import json
 import re
 import time
 
-from PySide6.QtCore import QEvent, QSettings, QSignalBlocker, QSizeF, QThread, QTimer, QUrl, Signal, Qt
+from PySide6.QtCore import QEvent, QSettings, QThread, QTimer, QUrl, Signal, Qt
 from PySide6.QtGui import (
-    QAction,
     QCloseEvent,
     QContextMenuEvent,
-    QKeyEvent,
     QKeySequence,
     QShortcut,
-    QTextBlockFormat,
     QTextCursor,
 )
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
-from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
+from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication,
-    QComboBox,
     QCheckBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
-    QFrame,
-    QGraphicsScene,
-    QGraphicsView,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -41,11 +32,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
-    QScrollArea,
-    QSlider,
     QSpinBox,
-    QSplitter,
-    QStatusBar,
     QToolBar,
     QVBoxLayout,
     QWidget,
@@ -68,7 +55,10 @@ from .readability import analyze_readability, required_reading_duration_ms, stru
 from .reflow import fallback_words, fit_readability_durations, reflow_subtitles
 from .timeline import NUDGE_MS, Timeline, TimelineError, active_segment_index, repair_segments, retime_segment_duration
 from .worker import TranscriptionJob, start_job
-from .waveform import WaveformWidget
+from .actions import SHORTCUTS, build_actions, native_shortcut
+from .branding import APP_NAME, STORAGE_APPLICATION, STORAGE_ORGANIZATION, application_data_path
+from .workspace import build_workspace
+from .theme import apply_theme
 
 MEDIA_FILTER = "Media (*.mp4 *.mov *.m4v *.mp3 *.wav *.m4a);;All files (*)"
 SRT_FILTER = "SubRip subtitles (*.srt)"
@@ -78,254 +68,16 @@ SRT_FILTER = "SubRip subtitles (*.srt)"
 class EditorSnapshot:
     segments: list[SubtitleSegment]
     source_words: list[TimedWord]
-    selected_id: str | None
+    selected_id: str | None = field(compare=False)
     layout_settings: SubtitleLayoutSettings
+    view_state: dict = field(default_factory=dict, compare=False)
 
 
 def _data_root() -> Path:
-    from PySide6.QtCore import QStandardPaths
-
-    return Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation))
+    return application_data_path()
 
 
-class EditableText(QPlainTextEdit):
-    editingStarted = Signal()
-    editingFinished = Signal()
-
-    def focusInEvent(self, event):
-        super().focusInEvent(event)
-        self.editingStarted.emit()
-
-    def focusOutEvent(self, event):
-        super().focusOutEvent(event)
-        self.editingFinished.emit()
-
-
-class TimestampEdit(QLineEdit):
-    nudgeRequested = Signal(int)
-    focused = Signal()
-
-    def focusInEvent(self, event):
-        super().focusInEvent(event)
-        self.focused.emit()
-
-    def keyPressEvent(self, event: QKeyEvent):
-        if event.key() == Qt.Key.Key_Up:
-            self.nudgeRequested.emit(NUDGE_MS)
-            event.accept()
-            return
-        if event.key() == Qt.Key.Key_Down:
-            self.nudgeRequested.emit(-NUDGE_MS)
-            event.accept()
-            return
-        super().keyPressEvent(event)
-
-
-class SubtitleVideoWidget(QGraphicsView):
-    """Render video and captions in one graphics scene so captions cannot sit behind video."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setFrameShape(QFrame.Shape.NoFrame)
-        self.setStyleSheet("QGraphicsView { background: black; }")
-        self.scene = QGraphicsScene(self)
-        self.setScene(self.scene)
-        self.video_item = QGraphicsVideoItem()
-        self.video_item.setAspectRatioMode(Qt.AspectRatioMode.KeepAspectRatio)
-        self.scene.addItem(self.video_item)
-        self.overlay = QLabel()
-        self.overlay.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
-        self.overlay.setWordWrap(True)
-        self.overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.overlay.setStyleSheet(
-            "QLabel { color: white; font-size: 22px; font-weight: 600; "
-            "background: rgba(0, 0, 0, 165); border-radius: 5px; padding: 8px 14px; }"
-        )
-        self.overlay_proxy = self.scene.addWidget(self.overlay)
-        self.overlay_proxy.setZValue(100)
-        self.overlay_proxy.hide()
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        width, height = self.viewport().width(), self.viewport().height()
-        self.scene.setSceneRect(0, 0, width, height)
-        self.video_item.setSize(QSizeF(width, height))
-        self.update_overlay_layout()
-
-    def update_overlay_layout(self):
-        width, height = self.viewport().width(), self.viewport().height()
-        overlay_width = max(120, round(width * 0.84))
-        overlay_height = min(130, max(70, round(height * 0.24)))
-        self.overlay.setFixedSize(overlay_width, overlay_height)
-        self.overlay_proxy.setPos((width - overlay_width) / 2, max(0, height - overlay_height - 24))
-
-    def set_overlay_visible(self, visible: bool):
-        self.overlay_proxy.setVisible(visible)
-        if visible:
-            self.overlay_proxy.setZValue(100)
-
-
-class FixedToolBar(QToolBar):
-    """A permanent toolbar without Qt's visibility checkbox popup."""
-
-    def contextMenuEvent(self, event: QContextMenuEvent):
-        event.accept()
-
-
-class SegmentCard(QFrame):
-    edited = Signal(int, str, str, str)
-    playRequested = Signal(int)
-    splitRequested = Signal(int)
-    deleteRequested = Signal(int)
-    nudgeRequested = Signal(int, str, int)
-    selected = Signal(int)
-    textEditedLive = Signal(int, str)
-    textEditStarted = Signal(int)
-
-    def __init__(self, index: int, segment: SubtitleSegment, parent=None):
-        super().__init__(parent)
-        self.index = index
-        self.segment_id = segment.id
-        self._updating_direction = False
-        self.setFrameShape(QFrame.Shape.StyledPanel)
-        self.setProperty("active", False)
-        self.setProperty("selected", False)
-        self.setProperty("error", False)
-        self.setStyleSheet(
-            "SegmentCard { border: 1px solid #555; border-radius: 5px; }"
-            "SegmentCard[active='true'] { border: 2px solid #36a3ff; background: #17334a; }"
-            "SegmentCard[error='true'] { border: 2px solid #e25555; background: #3a1d1d; }"
-            "SegmentCard[selected='true'] { border: 3px solid #d3a72f; }"
-        )
-        root = QVBoxLayout(self)
-        heading = QHBoxLayout()
-        heading.addWidget(QLabel(f"{index + 1}"))
-        self.start_edit = TimestampEdit(format_timestamp(segment.start_ms).replace(",", "."))
-        self.end_edit = TimestampEdit(format_timestamp(segment.end_ms).replace(",", "."))
-        self.start_edit.setAccessibleName("Start timestamp")
-        self.end_edit.setAccessibleName("End timestamp")
-        heading.addWidget(QLabel("Start"))
-        heading.addWidget(self.start_edit)
-        heading.addWidget(QLabel("End"))
-        heading.addWidget(self.end_edit)
-        root.addLayout(heading)
-
-        controls = QHBoxLayout()
-        for label, boundary, delta in (("Start −", "start", -NUDGE_MS), ("Start +", "start", NUDGE_MS),
-                                       ("End −", "end", -NUDGE_MS), ("End +", "end", NUDGE_MS)):
-            button = QPushButton(label)
-            button.setToolTip(f"Nudge {boundary} by {delta:+d} ms")
-            button.clicked.connect(lambda _checked=False, b=boundary, d=delta: self.nudgeRequested.emit(self.index, b, d))
-            controls.addWidget(button)
-        controls.addStretch()
-        play = QPushButton("Play segment")
-        split = QPushButton("Split at playhead")
-        delete = QPushButton("Delete")
-        play.clicked.connect(lambda: self.playRequested.emit(self.index))
-        split.clicked.connect(lambda: self.splitRequested.emit(self.index))
-        delete.clicked.connect(lambda: self.deleteRequested.emit(self.index))
-        controls.addWidget(play)
-        controls.addWidget(split)
-        controls.addWidget(delete)
-        root.addLayout(controls)
-
-        self.text_edit = EditableText(segment.text)
-        self.text_edit.setMaximumHeight(82)
-        self._apply_text_direction(segment.text)
-        root.addWidget(self.text_edit)
-        self.issue_label = QLabel()
-        self.issue_label.setWordWrap(True)
-        self.issue_label.setStyleSheet("color: #f2bd48;")
-        self.issue_label.hide()
-        root.addWidget(self.issue_label)
-        self.start_edit.editingFinished.connect(self._emit_edit)
-        self.end_edit.editingFinished.connect(self._emit_edit)
-        self.text_edit.editingFinished.connect(self._emit_edit)
-        self.text_edit.editingStarted.connect(self._text_edit_started)
-        self.text_edit.textChanged.connect(self._text_changed)
-        self.start_edit.focused.connect(lambda: self.selected.emit(self.index))
-        self.end_edit.focused.connect(lambda: self.selected.emit(self.index))
-        self.start_edit.nudgeRequested.connect(lambda amount: self.nudgeRequested.emit(self.index, "start", amount))
-        self.end_edit.nudgeRequested.connect(lambda amount: self.nudgeRequested.emit(self.index, "end", amount))
-        for child in self.findChildren(QWidget):
-            child.installEventFilter(self)
-
-    def _text_edit_started(self):
-        self.selected.emit(self.index)
-        self.textEditStarted.emit(self.index)
-
-    def _emit_edit(self):
-        self.edited.emit(self.index, self.start_edit.text(), self.end_edit.text(), self.text_edit.toPlainText())
-
-    def _text_changed(self):
-        if self._updating_direction:
-            return
-        text = self.text_edit.toPlainText()
-        self._apply_text_direction(text)
-        self.textEditedLive.emit(self.index, text)
-
-    def _apply_text_direction(self, text: str):
-        direction = Qt.LayoutDirection.RightToLeft if is_rtl_text(text) else Qt.LayoutDirection.LeftToRight
-        alignment = Qt.AlignmentFlag.AlignRight if direction is Qt.LayoutDirection.RightToLeft else Qt.AlignmentFlag.AlignLeft
-        self._updating_direction = True
-        try:
-            self.text_edit.setLayoutDirection(direction)
-            option = self.text_edit.document().defaultTextOption()
-            option.setTextDirection(direction)
-            option.setAlignment(alignment)
-            self.text_edit.document().setDefaultTextOption(option)
-            original_cursor = self.text_edit.textCursor()
-            cursor = QTextCursor(self.text_edit.document())
-            cursor.select(QTextCursor.SelectionType.Document)
-            block_format = QTextBlockFormat()
-            block_format.setLayoutDirection(direction)
-            block_format.setAlignment(alignment)
-            cursor.mergeBlockFormat(block_format)
-            self.text_edit.setTextCursor(original_cursor)
-        finally:
-            self._updating_direction = False
-
-    def mousePressEvent(self, event):
-        self.selected.emit(self.index)
-        super().mousePressEvent(event)
-
-    def eventFilter(self, watched, event):
-        if watched is not self and event.type() == QEvent.Type.MouseButtonPress:
-            self.selected.emit(self.index)
-        return super().eventFilter(watched, event)
-
-    def update_segment(self, segment: SubtitleSegment):
-        self.segment_id = segment.id
-        start = format_timestamp(segment.start_ms).replace(",", ".")
-        end = format_timestamp(segment.end_ms).replace(",", ".")
-        if self.start_edit.text() != start:
-            with QSignalBlocker(self.start_edit):
-                self.start_edit.setText(start)
-        if self.end_edit.text() != end:
-            with QSignalBlocker(self.end_edit):
-                self.end_edit.setText(end)
-        if self.text_edit.toPlainText() != segment.text:
-            with QSignalBlocker(self.text_edit):
-                self.text_edit.setPlainText(segment.text)
-        self._apply_text_direction(segment.text)
-
-    def set_active(self, active: bool):
-        self.setProperty("active", active)
-        self.style().unpolish(self)
-        self.style().polish(self)
-
-    def set_selected(self, selected: bool):
-        self.setProperty("selected", selected)
-        self.style().unpolish(self)
-        self.style().polish(self)
-
-    def set_issues(self, messages: list[str], error: bool = False):
-        self.setProperty("error", error)
-        self.issue_label.setText(" • ".join(messages))
-        self.issue_label.setStyleSheet(f"color: {'#ff6666' if error else '#f2bd48'};")
-        self.issue_label.setVisible(bool(messages))
-        self.style().unpolish(self)
-        self.style().polish(self)
+from .ui_widgets import EditableText, TimestampEdit, SubtitleVideoWidget, FixedToolBar, SegmentCard
 
 
 class ReadabilitySettingsDialog(QDialog):
@@ -368,6 +120,12 @@ class ReadabilitySettingsDialog(QDialog):
         buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
         self._load(self.settings)
+
+    def accept(self):
+        if self.min_duration.value() > self.max_duration.value():
+            QMessageBox.warning(self, "Invalid duration limits", "Minimum duration must not exceed maximum duration.")
+            return
+        super().accept()
 
     def _accept_reflow(self):
         self.reflow_requested = True
@@ -467,7 +225,7 @@ class QualityReportDialog(QDialog):
 
 class ModelInstallThread(QThread):
     status = Signal(str)
-    downloadProgress = Signal(int, int, str)
+    downloadProgress = Signal(object, object, str)
     failed = Signal(str)
     cancelled = Signal()
     installed = Signal()
@@ -501,7 +259,7 @@ class ModelInstallThread(QThread):
 
 
 class ModelVerificationThread(QThread):
-    progress = Signal(int, int, str)
+    progress = Signal(object, object, str)
     failed = Signal(str)
     cancelled = Signal()
     verified = Signal()
@@ -554,6 +312,7 @@ class ModelManagerDialog(QDialog):
         self.thread: ModelInstallThread | ModelVerificationThread | None = None
         self._verifying = False
         self._close_when_finished = False
+        self.active_manifest = None
         self.setWindowTitle("Local AI Models")
         self.resize(620, 380)
         layout = QVBoxLayout(self)
@@ -627,6 +386,8 @@ class ModelManagerDialog(QDialog):
             f"Source: {manifest.repository}\nStage: Checking disk space and existing files…"
         )
         self.thread = ModelInstallThread(self.store, manifest, self)
+        self.active_manifest = manifest
+        self.list.setEnabled(False)
         self.thread.status.connect(self._model_status_changed)
         self.thread.downloadProgress.connect(self._download_progress_changed)
         self.thread.failed.connect(self._install_failed)
@@ -651,6 +412,8 @@ class ModelManagerDialog(QDialog):
         self.download_progress.setFormat("Verifying…")
         self.status.setText(f"Model: {manifest.display_name}\nStage: Reading local weights and checking SHA-256…")
         self.thread = ModelVerificationThread(self.store, manifest, self)
+        self.active_manifest = manifest
+        self.list.setEnabled(False)
         self.thread.progress.connect(self._download_progress_changed)
         self.thread.failed.connect(self._verification_failed)
         self.thread.cancelled.connect(self._install_cancelled)
@@ -672,7 +435,7 @@ class ModelManagerDialog(QDialog):
         QMessageBox.critical(self, "Model integrity check failed", message)
 
     def _model_status_changed(self, stage: str):
-        manifest = self.selected_manifest()
+        manifest = self.active_manifest or self.selected_manifest()
         if not manifest:
             self.status.setText(stage)
             return
@@ -704,6 +467,7 @@ class ModelManagerDialog(QDialog):
         )
 
     def _thread_stopped(self):
+        thread = self.thread
         self.install_button.setEnabled(True)
         self.install_button.setText("Install")
         self.remove_button.setEnabled(True)
@@ -712,6 +476,10 @@ class ModelManagerDialog(QDialog):
         self.close_button.setEnabled(True)
         self._verifying = False
         self.thread = None
+        self.active_manifest = None
+        self.list.setEnabled(True)
+        if thread:
+            thread.deleteLater()
         if self._close_when_finished:
             self._close_when_finished = False
             super().reject()
@@ -729,7 +497,7 @@ class ModelManagerDialog(QDialog):
 
     def _download_progress_changed(self, current: int, total: int, description: str):
         name = description.rsplit("/", 1)[-1]
-        manifest = self.selected_manifest()
+        manifest = self.active_manifest or self.selected_manifest()
         model_name = manifest.display_name if manifest else "Selected model"
         if total <= 0:
             self.download_progress.setRange(0, 0)
@@ -772,12 +540,16 @@ class ModelManagerDialog(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("SubsGen Studio")
-        self.resize(1280, 820)
+        self.setWindowTitle(APP_NAME)
+        self.resize(1380, 900)
+        self.setMinimumSize(1024, 720)
+        if not QApplication.instance().property("subslabTheme"):
+            apply_theme(QApplication.instance())
+            QApplication.instance().setProperty("subslabTheme", True)
         root = _data_root()
         self.model_store = ModelStore(root / "models")
         self.recovery = RecoveryStore(root / "recovery.json")
-        self.settings_store = QSettings("SubsGen", "SubsGen Studio")
+        self.settings_store = QSettings(STORAGE_ORGANIZATION, STORAGE_APPLICATION)
         self.layout_settings = self._load_layout_settings()
         self.document = SubtitleDocument(layout_settings=self.layout_settings)
         self.timeline = Timeline()
@@ -806,9 +578,19 @@ class MainWindow(QMainWindow):
         self._search_dialog: SearchReplaceDialog | None = None
         self._search_state: tuple[str, bool, int, int] | None = None
         self.waveform_thread: WaveformLoadThread | None = None
+        self._waveform_threads: list[WaveformLoadThread] = []
+        self._rendering_cards = False
+        self._cancel_generation = 0
+        self._job_started_at: float | None = None
+        self._job_stage = "Ready"
+        self._job_progress: float | None = 0.0
+        self._active_device = "Detecting device"
+        self._last_preview = None
+        self._empty_cards_widget = None
         self._build_ui()
         self._build_actions()
         self._build_shortcuts()
+        self._restore_workspace()
         QApplication.instance().focusChanged.connect(self._focus_changed)
         self.recovery_timer = QTimer(self)
         self.recovery_timer.setSingleShot(True)
@@ -816,191 +598,37 @@ class MainWindow(QMainWindow):
         self.job_timer = QTimer(self)
         self.job_timer.setInterval(100)
         self.job_timer.timeout.connect(self._poll_job)
+        self.issue_timer = QTimer(self)
+        self.issue_timer.setSingleShot(True)
+        self.issue_timer.setInterval(150)
+        self.issue_timer.timeout.connect(self._refresh_issues)
+        self.elapsed_timer = QTimer(self)
+        self.elapsed_timer.setInterval(1000)
+        self.elapsed_timer.timeout.connect(lambda: self._set_transcription_progress(self._job_stage, self._job_progress))
         QTimer.singleShot(0, self._offer_recovery)
 
+    def _restore_workspace(self):
+        geometry = self.settings_store.value("workspace/geometry")
+        splitter = self.settings_store.value("workspace/splitter")
+        if geometry is not None:
+            self.restoreGeometry(geometry)
+        if splitter is not None:
+            self.splitter.restoreState(splitter)
+        expanded = self.settings_store.value("workspace/setup", True, type=bool)
+        self.setup_toggle.setChecked(expanded)
+        self.setup_panel.setVisible(expanded)
+
+    def _save_workspace(self):
+        self.settings_store.setValue("workspace/geometry", self.saveGeometry())
+        self.settings_store.setValue("workspace/splitter", self.splitter.saveState())
+        self.settings_store.setValue("workspace/setup", self.setup_toggle.isChecked())
+        self.settings_store.sync()
+
     def _build_ui(self):
-        splitter = QSplitter()
-        left = QWidget()
-        left_layout = QVBoxLayout(left)
-        setup = QFormLayout()
-        self.media_label = QLabel("No media selected")
-        self.media_label.setWordWrap(True)
-        self.mode_combo = QComboBox()
-        self.mode_combo.addItem("Transcribe in original language", TranscriptionMode.TRANSCRIBE)
-        self.mode_combo.addItem("Translate speech to English", TranscriptionMode.TRANSLATE)
-        self.language_combo = QComboBox()
-        for label, code in (("Auto detect", None), ("Hebrew", "he"), ("English", "en"), ("Arabic", "ar"),
-                            ("Spanish", "es"), ("French", "fr"), ("German", "de")):
-            self.language_combo.addItem(label, code)
-        setup.addRow("Media", self.media_label)
-        setup.addRow("Mode", self.mode_combo)
-        setup.addRow("Spoken language", self.language_combo)
-        self.glossary_edit = QLineEdit()
-        self.glossary_edit.setPlaceholderText("Names and technical terms, separated by commas")
-        self.glossary_edit.setToolTip("Terms are supplied to the local model as an initial spelling prompt")
-        setup.addRow("Glossary", self.glossary_edit)
-        self.denoise_check = QCheckBox("Reduce steady background noise before transcription")
-        setup.addRow("Audio cleanup", self.denoise_check)
-        left_layout.addLayout(setup)
-        transcribe_row = QHBoxLayout()
-        self.transcribe_button = QPushButton("Generate subtitles")
-        self.cancel_button = QPushButton("Cancel")
-        self.cancel_button.setEnabled(False)
-        self.transcribe_button.clicked.connect(self.start_transcription)
-        self.cancel_button.clicked.connect(self.cancel_transcription)
-        transcribe_row.addWidget(self.transcribe_button)
-        transcribe_row.addWidget(self.cancel_button)
-        left_layout.addLayout(transcribe_row)
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 100)
-        self.progress.setValue(0)
-        self.progress.setFormat("Ready")
-        left_layout.addWidget(self.progress)
-        self.progress_details = QLabel("No transcription job running")
-        self.progress_details.setWordWrap(True)
-        self.progress_details.setStyleSheet("color: #bdbdbd;")
-        left_layout.addWidget(self.progress_details)
-
-        self.player_surface = QWidget()
-        surface_layout = QGridLayout(self.player_surface)
-        surface_layout.setContentsMargins(0, 0, 0, 0)
-        self.video = SubtitleVideoWidget()
-        self.video.setMinimumHeight(260)
-        self.subtitle_overlay = self.video.overlay
-        self.audio_subtitle_panel = QLabel()
-        self.audio_subtitle_panel.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.audio_subtitle_panel.setWordWrap(True)
-        self.audio_subtitle_panel.setMinimumHeight(260)
-        self.audio_subtitle_panel.setStyleSheet(
-            "QLabel { color: white; font-size: 26px; background: #101010; padding: 32px; }"
-        )
-        surface_layout.addWidget(self.video, 0, 0)
-        surface_layout.addWidget(self.audio_subtitle_panel, 0, 0)
-        left_layout.addWidget(self.player_surface, 1)
-        self.waveform = WaveformWidget()
-        self.waveform.seekRequested.connect(self._seek)
-        self.waveform.boundaryMoved.connect(self._waveform_boundary_moved)
-        left_layout.addWidget(self.waveform)
-        player_controls = QHBoxLayout()
-        self.play_button = QPushButton("Play / Pause")
-        self.play_button.clicked.connect(self.toggle_playback)
-        self.position_slider = QSlider(Qt.Orientation.Horizontal)
-        self.position_slider.setRange(0, 0)
-        self.position_slider.sliderMoved.connect(self._seek)
-        self.time_label = QLabel("00:00:00.000 / 00:00:00.000")
-        self.cc_button = QPushButton("CC Subtitles")
-        self.cc_button.setCheckable(True)
-        self.cc_button.setChecked(True)
-        self.cc_button.toggled.connect(lambda _checked: self._update_subtitle_preview())
-        self.loop_button = QPushButton("Loop selected cue")
-        self.loop_button.setCheckable(True)
-        self.loop_button.setToolTip("Repeat the selected subtitle cue whenever playback is started")
-        self.loop_button.toggled.connect(self._loop_cue_toggled)
-        self.speed_combo = QComboBox()
-        for label, rate in (("0.5×", 0.5), ("0.75×", 0.75), ("1×", 1.0), ("1.25×", 1.25), ("1.5×", 1.5), ("2×", 2.0)):
-            self.speed_combo.addItem(label, rate)
-        self.speed_combo.setCurrentIndex(2)
-        self.speed_combo.currentIndexChanged.connect(
-            lambda _index: self.player.setPlaybackRate(float(self.speed_combo.currentData()))
-        )
-        player_controls.addWidget(self.play_button)
-        player_controls.addWidget(self.cc_button)
-        player_controls.addWidget(self.loop_button)
-        player_controls.addWidget(self.speed_combo)
-        player_controls.addWidget(self.position_slider, 1)
-        player_controls.addWidget(self.time_label)
-        left_layout.addLayout(player_controls)
-        self.audio_output = QAudioOutput(self)
-        self.player = QMediaPlayer(self)
-        self.player.setAudioOutput(self.audio_output)
-        self.player.setVideoOutput(self.video.video_item)
-        self.player.durationChanged.connect(self._duration_changed)
-        self.player.positionChanged.connect(self._position_changed)
-        self.player.hasVideoChanged.connect(self._has_video_changed)
-
-        right = QWidget()
-        right_layout = QVBoxLayout(right)
-        warning_row = QHBoxLayout()
-        self.warning_summary = QLabel("No readability warnings")
-        self.fix_segment_button = QPushButton("Fix segment")
-        self.fix_all_button = QPushButton("Fix all")
-        self.undo_button = QPushButton("Undo")
-        self.redo_button = QPushButton("Redo")
-        self.undo_fix_button = self.undo_button
-        self.fix_segment_button.setToolTip("Repair timing and reading speed without changing subtitle text")
-        self.fix_all_button.setToolTip("Repair all fixable timing warnings without changing subtitle text")
-        self.undo_button.setToolTip("Undo the most recent subtitle edit")
-        self.redo_button.setToolTip("Redo the most recently undone subtitle edit")
-        previous_warning = QPushButton("Previous warning")
-        next_warning = QPushButton("Next warning")
-        self.fix_segment_button.clicked.connect(self.fix_selected_segment)
-        self.fix_all_button.clicked.connect(self.fix_all_warnings)
-        self.undo_button.clicked.connect(self.undo_action)
-        self.redo_button.clicked.connect(self.redo_action)
-        previous_warning.clicked.connect(lambda: self._navigate_warning(-1))
-        next_warning.clicked.connect(lambda: self._navigate_warning(1))
-        warning_row.addWidget(self.warning_summary)
-        warning_row.addStretch()
-        warning_row.addWidget(self.fix_segment_button)
-        warning_row.addWidget(self.fix_all_button)
-        warning_row.addWidget(self.undo_button)
-        warning_row.addWidget(self.redo_button)
-        warning_row.addWidget(previous_warning)
-        warning_row.addWidget(next_warning)
-        right_layout.addLayout(warning_row)
-        cards_host = QWidget()
-        self.cards_layout = QVBoxLayout(cards_host)
-        self.cards_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self.cards_scroll = QScrollArea()
-        self.cards_scroll.setWidgetResizable(True)
-        self.cards_scroll.setWidget(cards_host)
-        self.cards_scroll.viewport().installEventFilter(self)
-        self.cards_scroll.verticalScrollBar().installEventFilter(self)
-        right_layout.addWidget(self.cards_scroll)
-        splitter.addWidget(left)
-        splitter.addWidget(right)
-        splitter.setSizes([540, 740])
-        self.setCentralWidget(splitter)
-        self.setStatusBar(QStatusBar())
+        build_workspace(self)
 
     def _build_actions(self):
-        toolbar = FixedToolBar("File")
-        toolbar.setMovable(False)
-        toolbar.setContextMenuPolicy(Qt.ContextMenuPolicy.PreventContextMenu)
-        toolbar.toggleViewAction().setVisible(False)
-        toolbar.toggleViewAction().setEnabled(False)
-        self.setContextMenuPolicy(Qt.ContextMenuPolicy.PreventContextMenu)
-        self.addToolBar(toolbar)
-        open_media = QAction("Open media", self)
-        open_media.setShortcut(QKeySequence.StandardKey.Open)
-        open_media.triggered.connect(self.open_media)
-        open_srt_action = QAction("Import SRT", self)
-        open_srt_action.triggered.connect(self.open_srt)
-        save_action = QAction("Save", self)
-        save_action.setShortcut(QKeySequence.StandardKey.Save)
-        save_action.triggered.connect(self.save_document)
-        save_copy = QAction("Save as copy", self)
-        save_copy.setShortcut(QKeySequence.StandardKey.SaveAs)
-        save_copy.triggered.connect(lambda: self.save_document(force_copy=True))
-        models = QAction("Models", self)
-        models.triggered.connect(self.open_models)
-        readability = QAction("Readability Settings", self)
-        readability.setShortcut(QKeySequence("Ctrl+,"))
-        readability.triggered.connect(self.open_readability_settings)
-        reflow = QAction("Reflow subtitles", self)
-        reflow.triggered.connect(self.reflow_current_subtitles)
-        shortcuts = QAction("Keyboard Shortcuts", self)
-        shortcuts.triggered.connect(self.show_shortcuts)
-        find_replace = QAction("Find / Replace", self)
-        find_replace.setShortcut(QKeySequence.StandardKey.Find)
-        find_replace.triggered.connect(self.open_find_replace)
-        quality_report = QAction("Quality Report", self)
-        quality_report.triggered.connect(self.open_quality_report)
-        export_formats = QAction("Export VTT / ASS", self)
-        export_formats.triggered.connect(self.export_additional_format)
-        toolbar.addActions([open_media, open_srt_action, save_action, save_copy])
-        toolbar.addSeparator()
-        toolbar.addActions([models, readability, reflow, find_replace, quality_report, export_formats, shortcuts])
+        build_actions(self)
 
     def createPopupMenu(self):
         return None
@@ -1034,27 +662,23 @@ class MainWindow(QMainWindow):
             shortcut.setEnabled(enabled)
 
     def _build_shortcuts(self):
-        for sequence in ("Space", "K"):
-            self._add_shortcut(sequence, lambda: self._unless_typing(self.toggle_playback))
-        self._add_shortcut("J", lambda: self._unless_typing(lambda: self._seek_relative(-5000)))
-        self._add_shortcut("L", lambda: self._unless_typing(lambda: self._seek_relative(5000)))
-        self._add_shortcut("Ctrl+Left", lambda: self._select_relative_cue(-1))
-        self._add_shortcut("Ctrl+Right", lambda: self._select_relative_cue(1))
-        self._add_shortcut("Enter", lambda: self._unless_typing(self._play_context_cue))
-        self._add_shortcut("Shift+Enter", lambda: self._unless_typing(self._play_context_with_handles))
-        self._add_shortcut("S", lambda: self._unless_typing(self._split_selected))
-        self._add_shortcut("Delete", lambda: self._unless_typing(self._delete_selected_confirmed))
-        self._add_shortcut("I", lambda: self._unless_typing(lambda: self._set_selected_boundary("start")))
-        self._add_shortcut("O", lambda: self._unless_typing(lambda: self._set_selected_boundary("end")))
-        self._add_shortcut("Alt+Left", lambda: self._unless_typing(lambda: self._nudge_selected("start", -NUDGE_MS)))
-        self._add_shortcut("Alt+Right", lambda: self._unless_typing(lambda: self._nudge_selected("start", NUDGE_MS)))
-        self._add_shortcut("Alt+Shift+Left", lambda: self._unless_typing(lambda: self._nudge_selected("end", -NUDGE_MS)))
-        self._add_shortcut("Alt+Shift+Right", lambda: self._unless_typing(lambda: self._nudge_selected("end", NUDGE_MS)))
-        self._add_shortcut("F7", lambda: self._navigate_warning(-1), typing_sensitive=False)
-        self._add_shortcut("F8", lambda: self._navigate_warning(1), typing_sensitive=False)
-        self._add_shortcut("Ctrl+Z", self.undo_action)
-        self._add_shortcut("Ctrl+Y", self.redo_action)
-        self._add_shortcut("Ctrl+Shift+Z", self.redo_action)
+        callbacks = {
+            "seek_back": lambda: self._seek_relative(-5000),
+            "seek_forward": lambda: self._seek_relative(5000),
+            "previous_cue": lambda: self._select_relative_cue(-1),
+            "next_cue": lambda: self._select_relative_cue(1),
+            "set_start": lambda: self._set_selected_boundary("start"),
+            "set_end": lambda: self._set_selected_boundary("end"),
+            "start_back": lambda: self._nudge_selected("start", -NUDGE_MS),
+            "start_forward": lambda: self._nudge_selected("start", NUDGE_MS),
+            "end_back": lambda: self._nudge_selected("end", -NUDGE_MS),
+            "end_forward": lambda: self._nudge_selected("end", NUDGE_MS),
+            "previous_warning": lambda: self._navigate_warning(-1),
+            "next_warning": lambda: self._navigate_warning(1),
+        }
+        for spec in SHORTCUTS:
+            callback = callbacks.get(spec.callback) or getattr(self, spec.callback)
+            self._add_shortcut(spec.keys, callback, spec.typing_sensitive)
 
     def _is_typing(self) -> bool:
         return isinstance(QApplication.focusWidget(), (QLineEdit, QPlainTextEdit))
@@ -1105,9 +729,14 @@ class MainWindow(QMainWindow):
     def _delete_selected_confirmed(self):
         if self.selected_index is None:
             return
+        self._delete_segment_confirmed(self.selected_index)
+
+    def _delete_segment_confirmed(self, index: int):
+        if not 0 <= index < len(self.timeline.segments):
+            return
         answer = QMessageBox.question(self, "Delete subtitle", "Delete the selected subtitle cue?")
         if answer == QMessageBox.StandardButton.Yes:
-            self._delete_segment(self.selected_index)
+            self._delete_segment(index)
 
     def _seek_relative(self, amount: int):
         self._seek(max(0, min(self.player.duration(), self.player.position() + amount)))
@@ -1123,16 +752,11 @@ class MainWindow(QMainWindow):
         self._select_segment(base, seek=True)
 
     def show_shortcuts(self):
-        QMessageBox.information(
-            self,
-            "Keyboard Shortcuts",
-            "Space / K   Play or pause\nJ / L   Seek 5 seconds\nCtrl+Left / Ctrl+Right   Previous / next cue\n"
-            "Enter   Play selected cue\nShift+Enter   Play cue with 0.5 s context\nS   Split at playhead\nDelete   Delete selected cue\n"
-            "I / O   Set cue start / end\nAlt+Left / Alt+Right   Nudge start 100 ms\n"
-            "Alt+Shift+Left / Alt+Shift+Right   Nudge end 100 ms\nF7 / F8   Previous / next warning\n"
-            "Ctrl+Z / Ctrl+Y   Undo / redo subtitle edits\nCtrl+F   Find and replace\nCtrl+,   Readability settings\n"
-            "Ctrl+S / Ctrl+Shift+S   Save / Save as copy",
-        )
+        lines = [f"{native_shortcut(spec.keys)}    {spec.label}" for spec in SHORTCUTS]
+        lines.extend(f"{item.shortcut().toString(QKeySequence.SequenceFormat.NativeText)}    {item.text()}"
+                     for item in self.actions.values() if not item.shortcut().isEmpty())
+        lines.append("↑ / ↓ in a timestamp    Nudge + / −100 ms")
+        QMessageBox.information(self, "Keyboard shortcuts", "\n".join(lines))
 
     def open_find_replace(self):
         if self._search_dialog is None:
@@ -1148,8 +772,12 @@ class MainWindow(QMainWindow):
         QualityReportDialog(self).exec()
 
     def export_additional_format(self):
+        self._commit_pending_text_edit()
+        self._refresh_issues()
         if not self.timeline.segments:
             QMessageBox.information(self, "Nothing to export", "There are no subtitles to export.")
+            return
+        if not self._prepare_export():
             return
         base = self.document.srt_path or (self.document.media_path or Path("subtitles")).with_suffix(".vtt")
         filename, selected_filter = QFileDialog.getSaveFileName(
@@ -1257,18 +885,32 @@ class MainWindow(QMainWindow):
         if not self.timeline.segments:
             return
         self._commit_pending_text_edit()
+        self._refresh_issues()
         before_reflow = history_before or self._snapshot_state()
+        selected_start = next((item.start_ms for item in before_reflow.segments if item.id == before_reflow.selected_id), 0)
         words = fallback_words(self.timeline.segments)
         try:
             segments = reflow_subtitles(words, self.layout_settings, self._known_duration())
             segments = fit_readability_durations(segments, self.layout_settings, 0, self._known_duration())
             segments, _ = repair_segments(segments, self._known_duration())
+            source_index = 0
+            reused_ids = set()
+            for segment in segments:
+                while (source_index + 1 < len(before_reflow.segments)
+                       and before_reflow.segments[source_index].end_ms <= segment.start_ms):
+                    source_index += 1
+                original = before_reflow.segments[source_index]
+                if original.id not in reused_ids:
+                    segment.id = original.id
+                    reused_ids.add(original.id)
             self.timeline = Timeline(segments, self._known_duration())
         except TimelineError as exc:
             QMessageBox.warning(self, "Could not reflow subtitles", str(exc))
             return
         self.document.source_words = words
         self.document.segments = self.timeline.segments
+        self.selected_index = next((i for i, item in enumerate(segments) if item.id == before_reflow.selected_id),
+                                   active_segment_index(segments, selected_start))
         self._record_history(before_reflow)
         self._render_segments()
         self._mark_dirty()
@@ -1278,12 +920,14 @@ class MainWindow(QMainWindow):
 
     def fix_selected_segment(self):
         self._commit_pending_text_edit()
+        self._refresh_issues()
+        self.issue_feedback.hide()
         context = self.selected_index if self.selected_index is not None else self.active_index
         index = context if context in self.timing_warning_indexes else (
             self.timing_warning_indexes[0] if self.timing_warning_indexes else None
         )
         if index is None or not 0 <= index < len(self.timeline.segments):
-            QMessageBox.information(self, "Fix subtitle", "There are no automatically fixable timing or reading-speed warnings.")
+            self.statusBar().showMessage("No timing fixes are needed. Use Reflow subtitles for line-layout warnings.", 7000)
             return
         target = self.timeline.segments[index]
         before_fix = self._snapshot_state()
@@ -1291,6 +935,12 @@ class MainWindow(QMainWindow):
         issue_codes = {item.code for item in self.issues_by_id.get(target.id, [])}
         current_duration = target.end_ms - target.start_ms
         required = required_reading_duration_ms(target, self.layout_settings)
+        if self.layout_settings.warn_duration and required > self.layout_settings.max_duration_ms:
+            self.issue_feedback.setText(
+                f"This cue needs {required / 1000:.1f}s to meet reading-speed limits, exceeding the "
+                f"{self.layout_settings.max_duration_ms / 1000:g}s maximum. Use Reflow subtitles to split it; wording is preserved.")
+            self.issue_feedback.show()
+            return
         if "duration_long" in issue_codes and required <= self.layout_settings.max_duration_ms:
             desired_duration = max(required, self.layout_settings.max_duration_ms)
         else:
@@ -1301,7 +951,8 @@ class MainWindow(QMainWindow):
             )
             self.timeline = Timeline(repaired, self._known_duration())
         except TimelineError as exc:
-            QMessageBox.warning(self, "Could not fix subtitle", str(exc))
+            self.issue_feedback.setText(str(exc) + ". Try Reflow subtitles to divide longer captions; accurate speech timing may still require a faster reading speed.")
+            self.issue_feedback.show()
             return
         if self.timeline.segments[index].text != original_text:
             raise AssertionError("Timing repair must not alter subtitle text")
@@ -1313,12 +964,15 @@ class MainWindow(QMainWindow):
         remaining_codes = {item.code for item in self.issues_by_id.get(target.id, [])}
         remaining_timing = remaining_codes & {"cps", "wpm", "duration_short", "duration_long"}
         if remaining_timing:
-            QMessageBox.warning(self, "Timing warning remains", "The available media timeline cannot satisfy this warning without an overlap.")
+            self.issue_feedback.setText("This cue needs more reading time than adjacent silence permits. The warning remains; try Reflow subtitles to split the caption.")
+            self.issue_feedback.show()
         else:
             self.statusBar().showMessage("Timing and reading-speed warnings were fixed; subtitle text was preserved exactly.", 7000)
 
     def fix_all_warnings(self):
         self._commit_pending_text_edit()
+        self._refresh_issues()
+        self.issue_feedback.hide()
         if not self.timing_warning_indexes:
             self.statusBar().showMessage("There are no automatically fixable timing or reading-speed warnings.", 4000)
             return
@@ -1333,6 +987,8 @@ class MainWindow(QMainWindow):
             original_texts = {item.id: item.text for item in self.timeline.segments}
             codes = {item.code for item in self.issues_by_id.get(segment_id, [])}
             required = required_reading_duration_ms(segment, self.layout_settings)
+            if self.layout_settings.warn_duration and required > self.layout_settings.max_duration_ms:
+                continue
             desired = (
                 max(required, self.layout_settings.max_duration_ms)
                 if "duration_long" in codes and required <= self.layout_settings.max_duration_ms
@@ -1351,6 +1007,9 @@ class MainWindow(QMainWindow):
             self._record_history(before_fix)
             self._mark_dirty()
         self._refresh_cards_from_timeline()
+        if self.timing_warning_indexes:
+            self.issue_feedback.setText(f"{len(self.timing_warning_indexes)} cues still need more reading time than the available silence permits. Try Reflow subtitles to split longer captions.")
+            self.issue_feedback.show()
         self.statusBar().showMessage(f"Fixed timing on {fixed} subtitle cue{'s' if fixed != 1 else ''}; all text was preserved.", 7000)
 
     def _selected_segment_id(self) -> str | None:
@@ -1364,6 +1023,7 @@ class MainWindow(QMainWindow):
             [TimedWord(word.text, word.start_ms, word.end_ms) for word in self.document.source_words],
             self._selected_segment_id(),
             SubtitleLayoutSettings.from_dict(self.layout_settings.to_dict()),
+            self._capture_view_state(),
         )
 
     def _record_history(self, before: EditorSnapshot):
@@ -1384,6 +1044,8 @@ class MainWindow(QMainWindow):
         self._clear_history()
 
     def _begin_text_edit(self, _index: int):
+        if self._rendering_cards:
+            return
         if self._pending_text_snapshot is None:
             self._pending_text_snapshot = self._snapshot_state()
 
@@ -1408,6 +1070,9 @@ class MainWindow(QMainWindow):
             (index for index, item in enumerate(self.timeline.segments) if item.id == snapshot.selected_id), None
         )
         self._render_segments()
+        self._restore_view_state(snapshot.view_state)
+        self._pending_scroll_restore = snapshot.view_state
+        self._pending_text_snapshot = None
 
     def undo_action(self):
         self._commit_pending_text_edit()
@@ -1457,6 +1122,7 @@ class MainWindow(QMainWindow):
             "source_words": [item.to_dict() for item in snapshot.source_words],
             "selected_id": snapshot.selected_id,
             "layout_settings": snapshot.layout_settings.to_dict(),
+            "view_state": snapshot.view_state,
         }
 
     @staticmethod
@@ -1466,6 +1132,7 @@ class MainWindow(QMainWindow):
             [TimedWord.from_dict(item) for item in value.get("source_words", [])],
             value.get("selected_id"),
             SubtitleLayoutSettings.from_dict(value.get("layout_settings")),
+            dict(value.get("view_state") or {}),
         )
 
     def open_media(self):
@@ -1476,7 +1143,8 @@ class MainWindow(QMainWindow):
 
     def _set_media(self, path: Path):
         self.document.media_path = path
-        self.media_label.setText(str(path))
+        self.media_label.setText(path.name)
+        self.media_label.setToolTip(str(path))
         self.player.setSource(QUrl.fromLocalFile(str(path)))
         self._has_video_changed(path.suffix.lower() in {".mp4", ".mov", ".m4v"})
         if self.waveform_thread and self.waveform_thread.isRunning():
@@ -1487,6 +1155,7 @@ class MainWindow(QMainWindow):
         thread.failed.connect(self._waveform_failed)
         thread.finished.connect(lambda: self._waveform_thread_finished(thread))
         self.waveform_thread = thread
+        self._waveform_threads.append(thread)
         thread.start()
 
     def _waveform_loaded(self, path: str, peaks: list[float], duration_ms: int):
@@ -1501,6 +1170,9 @@ class MainWindow(QMainWindow):
     def _waveform_thread_finished(self, thread: WaveformLoadThread):
         if self.waveform_thread is thread:
             self.waveform_thread = None
+        if thread in self._waveform_threads:
+            self._waveform_threads.remove(thread)
+        thread.deleteLater()
 
     def open_srt(self):
         if not self._confirm_replace_dirty():
@@ -1533,6 +1205,9 @@ class MainWindow(QMainWindow):
         ModelManagerDialog(self.model_store, self).exec()
 
     def start_transcription(self):
+        if self.job:
+            return
+        self._commit_pending_text_edit()
         if not self.document.media_path:
             QMessageBox.information(self, "Select media", "Open an audio or video file first.")
             return
@@ -1540,7 +1215,7 @@ class MainWindow(QMainWindow):
             media_path=self.document.media_path,
             mode=TranscriptionMode(self.mode_combo.currentData()),
             language=self.language_combo.currentData(),
-            layout_settings=self.layout_settings,
+            layout_settings=SubtitleLayoutSettings.from_dict(self.layout_settings.to_dict()),
             glossary=self.glossary_edit.text(),
             denoise=self.denoise_check.isChecked(),
         )
@@ -1567,14 +1242,31 @@ class MainWindow(QMainWindow):
             return
         self.active_manifest = manifest
         self.active_request = request
-        self.job = start_job(request, self.model_store.root)
+        try:
+            self.job = start_job(request, self.model_store.root)
+        except Exception as exc:
+            QMessageBox.critical(self, "Could not start transcription", str(exc))
+            return
+        self._cancel_generation += 1
+        self._job_started_at = time.monotonic()
+        self._active_device = "Detecting device"
+        self.elapsed_timer.start()
         self._dead_job_polls = 0
         self.transcribe_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
+        self._set_job_controls(True)
         self._set_transcription_progress("Starting worker process…", 0.0)
         self.job_timer.start()
 
     def _set_transcription_progress(self, stage: str, value: float | None):
+        self._job_stage, self._job_progress = stage, value
+        lowered = stage.lower()
+        if "cpu" in lowered:
+            self._active_device = "CPU · int8"
+        elif "cuda" in lowered:
+            self._active_device = "NVIDIA CUDA"
+        elif "mlx" in lowered or "apple silicon" in lowered:
+            self._active_device = "Apple Silicon · MLX"
         if value is None:
             self.progress.setRange(0, 0)
             self.progress.setFormat(stage)
@@ -1587,15 +1279,24 @@ class MainWindow(QMainWindow):
         request = self.active_request
         if manifest and request:
             language = request.language or "automatic detection"
-            hardware = ", ".join(manifest.hardware)
+            elapsed = max(0, int(time.monotonic() - self._job_started_at)) if self._job_started_at else 0
+            elapsed_text = f"{elapsed // 60:02d}:{elapsed % 60:02d}"
             self.progress_details.setText(
                 f"Model: {manifest.display_name} ({manifest.id})  •  Engine: {manifest.backend.value}  •  "
-                f"Task: {request.mode.value}  •  Language: {language}  •  Supported hardware: {hardware}\n"
-                f"Current stage: {stage}"
+                f"Task: {request.mode.value}  •  Language: {language}\n"
+                f"Current stage: {stage}  •  Device: {self._active_device}  •  Elapsed: {elapsed_text}"
             )
         else:
             self.progress_details.setText(f"Current stage: {stage}")
         self.statusBar().showMessage(stage)
+
+    def _set_job_controls(self, running: bool):
+        self.cancel_button.setVisible(running)
+        for widget in (self.mode_combo, self.language_combo, self.advanced_panel, self.cards_scroll):
+            widget.setEnabled(not running)
+        for key in ("open", "import", "reflow", "readability", "find", "models"):
+            self.actions[key].setEnabled(not running)
+        self._update_fix_buttons()
 
     def cancel_transcription(self):
         if not self.job:
@@ -1603,10 +1304,13 @@ class MainWindow(QMainWindow):
         self.job.cancel()
         self.cancel_button.setEnabled(False)
         self.statusBar().showMessage("Cancelling…")
-        QTimer.singleShot(2500, self._force_cancel)
+        generation = self._cancel_generation
+        QTimer.singleShot(2500, lambda: self._force_cancel(generation))
 
-    def _force_cancel(self):
-        if self.job and self.job.is_alive:
+    def _force_cancel(self, generation: int | None = None):
+        if generation is not None and generation != self._cancel_generation:
+            return
+        if self.job:
             self.job.terminate()
             self._finish_job("Transcription cancelled")
 
@@ -1649,13 +1353,15 @@ class MainWindow(QMainWindow):
                                 self.language_combo.setCurrentIndex(language_index)
                             QTimer.singleShot(0, self.start_transcription)
             elif event_type == "result":
-                words = [TimedWord.from_dict(item) for item in event.get("words", [])]
-                segments = (
-                    reflow_subtitles(words, self.layout_settings, self._known_duration())
-                    if words else [SubtitleSegment.from_dict(item) for item in event["segments"]]
-                )
-                segments, _ = repair_segments(segments, self._known_duration())
-                self.timeline = Timeline(segments, self._known_duration())
+                try:
+                    words = [TimedWord.from_dict(item) for item in event.get("words", [])]
+                    segments = [SubtitleSegment.from_dict(item) for item in event["segments"]]
+                    segments, _ = repair_segments(segments, self._known_duration())
+                    self.timeline = Timeline(segments, self._known_duration())
+                except (ValueError, KeyError, TypeError) as exc:
+                    self._finish_job("Transcription result could not be loaded")
+                    QMessageBox.critical(self, "Invalid transcription result", str(exc))
+                    return
                 self.document.segments = self.timeline.segments
                 self.document.source_words = words
                 self.document.layout_settings = SubtitleLayoutSettings.from_dict(event.get("layout_settings"))
@@ -1663,13 +1369,14 @@ class MainWindow(QMainWindow):
                 self._save_layout_settings()
                 self.document.srt_path = None
                 self.document.language = event.get("detected_language") or self.language_combo.currentData()
-                self.document.mode = TranscriptionMode(self.mode_combo.currentData())
+                self.document.mode = self.active_request.mode if self.active_request else TranscriptionMode(self.mode_combo.currentData())
                 self.document.glossary = tuple(self.active_request.glossary) if self.active_request else ()
                 self.document.denoise = bool(self.active_request.denoise) if self.active_request else False
                 self._clear_fix_undo()
                 self._render_segments()
                 self._mark_dirty()
                 self._finish_job(f"Generated {len(segments)} subtitles")
+                self.setup_toggle.setChecked(False)
             elif event_type == "cancelled":
                 self._finish_job("Transcription cancelled")
             elif event_type == "error":
@@ -1691,9 +1398,12 @@ class MainWindow(QMainWindow):
         if self.job:
             self.job.process.join(timeout=0.2)
         self.job = None
+        self._cancel_generation += 1
         self.job_timer.stop()
+        self.elapsed_timer.stop()
         self.transcribe_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
+        self._set_job_controls(False)
         self.progress.setRange(0, 100)
         if message.startswith("Generated"):
             self.progress.setValue(100)
@@ -1705,50 +1415,125 @@ class MainWindow(QMainWindow):
             self.progress_details.setText(self.progress_details.text().split("\nCurrent stage:")[0] + f"\nCurrent stage: {message}")
         self.statusBar().showMessage(message, 6000)
 
+    def _capture_view_state(self) -> dict:
+        focused = QApplication.focusWidget()
+        state = {"scroll": self.cards_scroll.verticalScrollBar().value()}
+        for card in self.cards:
+            if focused in (card.text_edit, card.start_edit, card.end_edit):
+                state["focus_id"] = card.segment_id
+                if focused is card.text_edit:
+                    cursor = card.text_edit.textCursor()
+                    state.update(field="text", position=cursor.position(), anchor=cursor.anchor())
+                else:
+                    state.update(field="start" if focused is card.start_edit else "end",
+                                 position=focused.cursorPosition(), anchor=focused.selectionStart(),
+                                 selection_length=len(focused.selectedText()))
+                break
+        return state
+
+    def _restore_view_state(self, state: dict, restore_focus: bool = True):
+        self.cards_scroll.verticalScrollBar().setValue(state.get("scroll", 0))
+        if not restore_focus:
+            return
+        card = next((item for item in self.cards if item.segment_id == state.get("focus_id")), None)
+        if card is None:
+            return
+        if state.get("field") == "text":
+            editor = card.text_edit
+            cursor = editor.textCursor()
+            limit = max(0, editor.document().characterCount() - 1)
+            cursor.setPosition(min(state.get("anchor", 0), limit))
+            cursor.setPosition(min(state.get("position", 0), limit), QTextCursor.MoveMode.KeepAnchor)
+            editor.setTextCursor(cursor)
+        else:
+            editor = card.start_edit if state.get("field") == "start" else card.end_edit
+            editor.setCursorPosition(min(state.get("position", 0), len(editor.text())))
+            if state.get("anchor", -1) >= 0:
+                editor.setSelection(state["anchor"], state.get("selection_length", 0))
+        editor.setFocus()
+
     def _render_segments(self):
-        selected_id = None
-        if self.selected_index is not None and 0 <= self.selected_index < len(self.timeline.segments):
-            selected_id = self.timeline.segments[self.selected_index].id
-        self.cards = []
-        self.active_index = None
-        self.selected_index = None
-        while self.cards_layout.count():
-            item = self.cards_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        for index, segment in enumerate(self.timeline.segments):
-            card = SegmentCard(index, segment)
-            card.edited.connect(self._edit_segment)
-            card.playRequested.connect(self._play_segment)
-            card.splitRequested.connect(self._split_segment)
-            card.deleteRequested.connect(self._delete_segment)
-            card.nudgeRequested.connect(self._nudge_segment)
-            card.selected.connect(self._select_segment)
-            card.textEditedLive.connect(self._live_text_changed)
-            card.textEditStarted.connect(self._begin_text_edit)
-            self.cards_layout.addWidget(card)
-            self.cards.append(card)
-            if segment.id == selected_id:
-                self.selected_index = index
-                card.set_selected(True)
-        if not self.timeline.segments:
-            placeholder = QLabel("Open media and generate subtitles, or import an SRT file.")
-            placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.cards_layout.addWidget(placeholder)
-        self._refresh_issues()
-        self._position_changed(self.player.position())
-        self.waveform.set_timeline(self.timeline.segments, self.selected_index)
+        """Reconcile by cue ID; existing editors keep their cursor and native history."""
+        view_state = self._capture_view_state()
+        selected_id = self._selected_segment_id()
+        previous_index = self.selected_index
+        old_cards = {card.segment_id: card for card in self.cards}
+        self._rendering_cards = True
+        try:
+            while self.cards_layout.count():
+                self.cards_layout.takeAt(0)
+            if self._empty_cards_widget is not None:
+                self._empty_cards_widget.deleteLater()
+                self._empty_cards_widget = None
+            self.cards = []
+            for index, segment in enumerate(self.timeline.segments):
+                card = old_cards.pop(segment.id, None)
+                if card is None:
+                    card = SegmentCard(index, segment)
+                    card.edited.connect(self._edit_segment)
+                    card.playRequested.connect(self._play_segment)
+                    card.splitRequested.connect(self._split_segment)
+                    card.deleteRequested.connect(self._delete_segment_confirmed)
+                    card.nudgeRequested.connect(self._nudge_segment)
+                    card.selected.connect(self._select_segment)
+                    card.textEditedLive.connect(self._live_text_changed)
+                    card.textEditStarted.connect(self._begin_text_edit)
+                    card.undoRequested.connect(self.undo_action)
+                    card.redoRequested.connect(self.redo_action)
+                card.set_index(index)
+                card.update_segment(segment)
+                self.cards_layout.addWidget(card)
+                self.cards.append(card)
+            for card in old_cards.values():
+                for signal in (card.edited, card.playRequested, card.splitRequested,
+                               card.deleteRequested, card.nudgeRequested, card.selected,
+                               card.textEditedLive, card.textEditStarted, card.undoRequested, card.redoRequested):
+                    signal.disconnect()
+                card.hide()
+                card.deleteLater()
+            self.selected_index = next(
+                (i for i, item in enumerate(self.timeline.segments) if item.id == selected_id), None)
+            if self.selected_index is None and self.cards:
+                self.selected_index = min(previous_index or 0, len(self.cards) - 1)
+            self.active_index = None
+            for index, card in enumerate(self.cards):
+                card.set_selected(index == self.selected_index)
+                card.set_active(False)
+            if not self.cards:
+                empty = QWidget()
+                layout = QVBoxLayout(empty)
+                label = QLabel("Create something worth reading.\nGenerate subtitles from media, or import an existing SRT.")
+                label.setObjectName("muted")
+                label.setWordWrap(True)
+                label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                layout.addWidget(label)
+                button = QPushButton("Import SRT…")
+                button.clicked.connect(self.open_srt)
+                layout.addWidget(button, 0, Qt.AlignmentFlag.AlignHCenter)
+                self.cards_layout.addWidget(empty)
+                self._empty_cards_widget = empty
+            self.cue_count_label.setText(f"{len(self.cards)} cue{'s' if len(self.cards) != 1 else ''}")
+            self._refresh_issues()
+            self._position_changed(self.player.position())
+            self.waveform.set_timeline(self.timeline.segments, self.selected_index)
+        finally:
+            self._rendering_cards = False
+        self.cards_layout.activate()
+        self._restore_view_state(view_state)
+        self._pending_scroll_restore = view_state
+        QTimer.singleShot(0, self._restore_pending_scroll)
+
+    def _restore_pending_scroll(self):
+        self._restore_view_state(self._pending_scroll_restore, restore_focus=False)
 
     def _refresh_cards_from_timeline(self):
-        """Refresh existing cards without destroying focus or swallowing a pending click."""
         if len(self.cards) != len(self.timeline.segments) or any(
             card.segment_id != segment.id for card, segment in zip(self.cards, self.timeline.segments)
         ):
             self._render_segments()
             return
-        for card, segment in zip(self.cards, self.timeline.segments):
+        for index, (card, segment) in enumerate(zip(self.cards, self.timeline.segments)):
             card.update_segment(segment)
-        for index, card in enumerate(self.cards):
             card.set_selected(index == self.selected_index)
         self._refresh_issues()
         self._position_changed(self.player.position())
@@ -1757,6 +1542,7 @@ class MainWindow(QMainWindow):
     def _select_segment(self, index: int, seek: bool = False):
         if not 0 <= index < len(self.cards):
             return
+        changed = self.selected_index != index
         if self.selected_index is not None and self.selected_index < len(self.cards):
             self.cards[self.selected_index].set_selected(False)
         self.selected_index = index
@@ -1768,7 +1554,8 @@ class MainWindow(QMainWindow):
             self.segment_stop_ms = segment.end_ms
         if seek:
             self.player.setPosition(self.timeline.segments[index].start_ms)
-        self.cards_scroll.ensureWidgetVisible(self.cards[index], 20, 50)
+        if (changed or seek) and not self._rendering_cards:
+            self.cards_scroll.ensureWidgetVisible(self.cards[index], 20, 50)
         self._update_fix_buttons()
 
     def _set_active_index(self, index: int | None):
@@ -1779,8 +1566,9 @@ class MainWindow(QMainWindow):
             self.cards[self.active_index].set_active(False)
         self.active_index = index
         if index is not None and index < len(self.cards):
+            self.cards[index].play_indicator.setText("PLAYING" if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState else "CURRENT")
             self.cards[index].set_active(True)
-            if not self._is_typing() and time.monotonic() >= self._manual_scroll_until:
+            if not self._rendering_cards and not self._is_typing() and time.monotonic() >= self._manual_scroll_until:
                 self.cards_scroll.ensureWidgetVisible(self.cards[index], 20, 80)
         self._update_subtitle_preview()
 
@@ -1790,6 +1578,10 @@ class MainWindow(QMainWindow):
             text = self.timeline.segments[self.active_index].text
         direction = Qt.LayoutDirection.RightToLeft if is_rtl_text(text) else Qt.LayoutDirection.LeftToRight
         video_text = text if self.cc_button.isChecked() else ""
+        state = (text, direction, video_text, self._has_video)
+        if state == self._last_preview:
+            return
+        self._last_preview = state
         self.subtitle_overlay.setText(video_text)
         self.subtitle_overlay.setLayoutDirection(direction)
         self.video.update_overlay_layout()
@@ -1799,8 +1591,7 @@ class MainWindow(QMainWindow):
 
     def _has_video_changed(self, has_video: bool):
         self._has_video = has_video
-        self.video.setVisible(has_video)
-        self.audio_subtitle_panel.setVisible(not has_video)
+        self.player_surface.setCurrentWidget(self.video if has_video else self.audio_subtitle_panel)
         self.cc_button.setVisible(has_video)
         self._update_subtitle_preview()
 
@@ -1812,6 +1603,8 @@ class MainWindow(QMainWindow):
         return super().eventFilter(watched, event)
 
     def _refresh_issues(self):
+        if hasattr(self, "issue_timer"):
+            self.issue_timer.stop()
         by_id = analyze_readability(self.timeline.segments, self.layout_settings)
         errors = structural_issues(self.timeline.segments, self._known_duration())
         for error in errors:
@@ -1829,16 +1622,35 @@ class MainWindow(QMainWindow):
                 self.timing_warning_indexes.append(index)
         count = sum(len(items) for items in by_id.values())
         self.issue_count = count
-        self.warning_summary.setText(f"{count} readability/timing warning{'s' if count != 1 else ''}" if count else "No readability warnings")
+        self.warning_summary.setText(f"{count} warning{'s' if count != 1 else ''}" if count else "No readability warnings")
         self._update_fix_buttons()
 
     def _update_fix_buttons(self):
         if not hasattr(self, "fix_segment_button"):
             return
-        self.fix_segment_button.setEnabled(bool(self.timing_warning_indexes))
-        self.fix_all_button.setEnabled(bool(self.timing_warning_indexes))
-        self.undo_button.setEnabled(bool(self.undo_stack))
-        self.redo_button.setEnabled(bool(self.redo_stack))
+        idle = self.job is None
+        self.fix_segment_button.setEnabled(idle and bool(self.timing_warning_indexes))
+        self.fix_all_button.setEnabled(idle and bool(self.timing_warning_indexes))
+        pending = self._pending_text_snapshot is not None
+        if hasattr(self, "actions"):
+            self.actions["undo"].setEnabled(idle and (bool(self.undo_stack) or pending))
+            self.actions["redo"].setEnabled(idle and bool(self.redo_stack))
+
+    def _refresh_edited_cue(self, index: int):
+        segment = self.timeline.segments[index]
+        previous = self.issues_by_id.pop(segment.id, [])
+        items = analyze_readability([segment], self.layout_settings).get(segment.id, [])
+        if items:
+            self.issues_by_id[segment.id] = items
+        self.cards[index].set_issues([item.message for item in items])
+        self.issue_count += len(items) - len(previous)
+        self.issue_timer.start()
+        self._update_fix_buttons()
+
+    def _playback_state_changed(self, state):
+        self.play_button.setText("Pause" if state == QMediaPlayer.PlaybackState.PlayingState else "Play")
+        if self.active_index is not None and self.active_index < len(self.cards):
+            self.cards[self.active_index].play_indicator.setText("PLAYING" if state == QMediaPlayer.PlaybackState.PlayingState else "CURRENT")
 
     def _navigate_warning(self, direction: int):
         if not self.warning_indexes:
@@ -1852,12 +1664,16 @@ class MainWindow(QMainWindow):
         self._select_segment(target, seek=True)
 
     def _edit_segment(self, index: int, start_text: str, end_text: str, text: str):
+        if self._rendering_cards:
+            return
         try:
             self._apply_segment_update(index, parse_timestamp(start_text), parse_timestamp(end_text), text)
         except (ValueError, TimelineError) as exc:
             QMessageBox.warning(self, "Invalid subtitle timing", str(exc))
 
     def _live_text_changed(self, index: int, text: str):
+        if self._rendering_cards:
+            return
         if not 0 <= index < len(self.timeline.segments):
             return
         if self._pending_text_snapshot is None:
@@ -1866,7 +1682,7 @@ class MainWindow(QMainWindow):
         self.document.segments = self.timeline.segments
         if self.active_index == index:
             self._update_subtitle_preview()
-        self._refresh_issues()
+        self._refresh_edited_cue(index)
         self._mark_dirty()
 
     def _apply_segment_update(self, index: int, start_ms: int, end_ms: int, text: str):
@@ -1985,7 +1801,7 @@ class MainWindow(QMainWindow):
         if not self.position_slider.isSliderDown():
             self.position_slider.setValue(position)
         self.time_label.setText(
-            f"{format_timestamp(position).replace(',', '.')} / {format_timestamp(self.player.duration()).replace(',', '.')}"
+            f"{format_timestamp(position).replace(',', '.')} / {format_timestamp(self._known_duration() or 0).replace(',', '.')}"
         )
         self.waveform.set_position(position)
         if self.segment_stop_ms is not None and position >= self.segment_stop_ms:
@@ -2015,23 +1831,32 @@ class MainWindow(QMainWindow):
         except TimelineError as exc:
             QMessageBox.warning(self, "Cannot move subtitle boundary", str(exc))
 
-    def save_document(self, force_copy: bool = False) -> bool:
-        if not self.timeline.segments:
-            QMessageBox.information(self, "Nothing to save", "There are no subtitles to save.")
-            return False
+    def _prepare_export(self) -> bool:
+        before = self._snapshot_state()
         try:
-            repaired_segments, repaired = repair_segments(self.timeline.segments, self._known_duration())
-            errors = structural_issues(repaired_segments, self._known_duration())
+            segments, repaired = repair_segments(self.timeline.segments, self._known_duration())
+            errors = structural_issues(segments, self._known_duration())
             if errors:
                 raise TimelineError(errors[0].message)
             if repaired:
-                self.timeline = Timeline(repaired_segments, self._known_duration())
+                self.timeline = Timeline(segments, self._known_duration())
                 self.document.segments = self.timeline.segments
+                self._record_history(before)
                 self._render_segments()
-                self.statusBar().showMessage(f"Repaired {repaired} timing entries before saving", 6000)
+                self._mark_dirty()
         except TimelineError as exc:
             self._refresh_issues()
-            QMessageBox.critical(self, "Cannot export subtitles", f"A valid non-overlapping timeline could not be produced:\n{exc}")
+            QMessageBox.critical(self, "Cannot export subtitles", str(exc))
+            return False
+        return True
+
+    def save_document(self, force_copy: bool = False) -> bool:
+        self._commit_pending_text_edit()
+        self._refresh_issues()
+        if not self.timeline.segments:
+            self.statusBar().showMessage("Create or import subtitles before saving.", 6000)
+            return False
+        if not self._prepare_export():
             return False
         destination = self.document.srt_path
         if destination and not force_copy:
@@ -2059,6 +1884,7 @@ class MainWindow(QMainWindow):
             return False
         self.document.srt_path = destination
         self._set_dirty(False)
+        self.recovery_timer.stop()
         self.recovery.clear()
         self.statusBar().showMessage(f"Saved {destination}", 6000)
         return True
@@ -2070,7 +1896,7 @@ class MainWindow(QMainWindow):
     def _set_dirty(self, dirty: bool):
         self.dirty = dirty
         name = self.document.srt_path.name if self.document.srt_path else "Untitled"
-        self.setWindowTitle(f"{'*' if dirty else ''}{name} — SubsGen Studio")
+        self.setWindowTitle(f"{'*' if dirty else ''}{name} — {APP_NAME}")
 
     def _write_recovery(self):
         if self.dirty:
@@ -2092,7 +1918,7 @@ class MainWindow(QMainWindow):
         if not self.recovery.exists():
             self._render_segments()
             return
-        answer = QMessageBox.question(self, "Recover unsaved work", "SubsGen Studio found unsaved work. Recover it?")
+        answer = QMessageBox.question(self, "Recover unsaved work", f"{APP_NAME} found unsaved work. Recover it?")
         if answer == QMessageBox.StandardButton.Yes:
             try:
                 self.document = self.recovery.load()
@@ -2120,7 +1946,7 @@ class MainWindow(QMainWindow):
         self._render_segments()
 
     def _known_duration(self) -> int | None:
-        return self.player.duration() or None
+        return self.player.duration() or (self.waveform.duration_ms if self.document.media_path else 0) or None
 
     def _confirm_replace_dirty(self) -> bool:
         if not self.dirty:
@@ -2139,30 +1965,46 @@ class MainWindow(QMainWindow):
         return False
 
     def closeEvent(self, event: QCloseEvent):
-        if self.waveform_thread and self.waveform_thread.isRunning():
-            self.waveform_thread.requestInterruption()
-            if not self.waveform_thread.wait(1500):
-                self.waveform_thread.terminate()
-                self.waveform_thread.wait(250)
-        if self.job:
-            answer = QMessageBox.question(self, "Transcription running", "Cancel transcription and quit?")
-            if answer != QMessageBox.StandardButton.Yes:
-                event.ignore()
-                return
-            self.job.terminate()
-        if self.dirty:
-            answer = QMessageBox.warning(
-                self,
-                "Unsaved changes",
-                "Save your subtitle changes before quitting?",
-                QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
-            )
-            if answer == QMessageBox.StandardButton.Save and not self.save_document():
-                event.ignore()
-                return
-            if answer == QMessageBox.StandardButton.Cancel:
-                event.ignore()
-                return
-            if answer == QMessageBox.StandardButton.Discard:
-                self.recovery.clear()
+        self._commit_pending_text_edit()
+        if not getattr(self, "_close_authorized", False):
+            if self.job:
+                answer = QMessageBox.question(self, "Transcription running", "Cancel transcription and quit?")
+                if answer != QMessageBox.StandardButton.Yes:
+                    event.ignore()
+                    return
+            if self.dirty:
+                answer = QMessageBox.warning(
+                    self, "Unsaved changes", "Save your subtitle changes before quitting?",
+                    QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                )
+                if answer == QMessageBox.StandardButton.Cancel:
+                    event.ignore()
+                    return
+                if answer == QMessageBox.StandardButton.Save and not self.save_document():
+                    event.ignore()
+                    return
+                if answer == QMessageBox.StandardButton.Discard:
+                    self.recovery.clear()
+                    self._set_dirty(False)
+            self._close_authorized = True
+            self.recovery_timer.stop()
+            self.issue_timer.stop()
+            self.elapsed_timer.stop()
+            self._save_workspace()
+            if self.job:
+                self.job.terminate()
+                self.job = None
+                self.job_timer.stop()
+        running = [thread for thread in self._waveform_threads if thread.isRunning()]
+        if running:
+            for thread in running:
+                thread.requestInterruption()
+                if not thread.property("closingConnection"):
+                    thread.setProperty("closingConnection", True)
+                    thread.finished.connect(lambda: QTimer.singleShot(0, self.close))
+            self.centralWidget().setEnabled(False)
+            self.statusBar().showMessage("Finishing audio cleanup before closing…")
+            event.ignore()
+            return
+        self.player.stop()
         event.accept()

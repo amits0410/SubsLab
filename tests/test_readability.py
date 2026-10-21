@@ -23,3 +23,8 @@ def test_warning_toggle_disables_category():
     settings = SubtitleLayoutSettings(warn_cps=False, warn_wpm=False, warn_line_length=False,
                                       warn_line_count=False, warn_duration=False)
     assert not _codes(SubtitleSegment("quiet", 0, 50, "x" * 100), settings)
+
+
+def test_maximum_duration_warning_is_not_hidden_by_reading_speed_conflict():
+    segment = SubtitleSegment("long", 0, 9000, "word " * 50)
+    assert "duration_long" in _codes(segment)

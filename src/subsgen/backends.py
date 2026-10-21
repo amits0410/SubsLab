@@ -34,14 +34,14 @@ class FasterWhisperBackend:
                 device, compute_type = "cuda", "float16"
         except Exception:
             pass
-        progress(ProgressEvent(0.08, f"Loading {request.model_id or 'Whisper model'} on {device.upper()} ({compute_type})…"))
+        progress(ProgressEvent(None, f"Loading {request.model_id or 'Whisper model'} on {device.upper()} ({compute_type})…"))
         try:
             model = WhisperModel(str(model_path), device=device, compute_type=compute_type)
         except Exception:
             if device != "cuda":
                 raise
             device, compute_type = "cpu", "int8"
-            progress(ProgressEvent(0.08, "CUDA initialization failed; loading CPU int8 fallback…"))
+            progress(ProgressEvent(None, "CUDA initialization failed; loading CPU int8 fallback…"))
             model = WhisperModel(str(model_path), device=device, compute_type=compute_type)
         language = "he" if request.language == "he" else request.language
         segments, info = model.transcribe(
@@ -110,7 +110,7 @@ class MLXWhisperBackend:
             audio.samples = denoise_audio(audio.samples, cancelled)
         if cancelled():
             raise InterruptedError("Transcription cancelled")
-        progress(ProgressEvent(0.08, f"Loading {request.model_id or 'Whisper model'} with MLX on Apple Silicon…"))
+        progress(ProgressEvent(None, f"Loading and transcribing with {request.model_id or 'Whisper model'} using MLX on Apple Silicon…"))
         result = mlx_whisper.transcribe(
             audio.samples,
             path_or_hf_repo=str(model_path),

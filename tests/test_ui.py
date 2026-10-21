@@ -13,7 +13,7 @@ def test_main_window_smoke(qtbot, monkeypatch, tmp_path):
     qtbot.addWidget(window)
     window.show()
     qtbot.waitExposed(window)
-    assert window.windowTitle().endswith("SubsGen Studio")
+    assert window.windowTitle().endswith("SubsLab")
     assert window.mode_combo.count() == 2
     assert window.language_combo.findData("he") >= 0
     qtbot.waitUntil(lambda: window.cards_layout.count() == 1)
