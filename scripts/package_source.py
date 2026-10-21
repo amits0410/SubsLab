@@ -11,7 +11,7 @@ from subsgen.branding import APP_VERSION
 def main():
     files = [ROOT / name for name in ("README.md", "pyproject.toml", "SubsLab.spec", ".gitignore", ".gitattributes")]
     for directory, pattern in (("src/subsgen", "*.py"), ("tests", "*.py"), ("scripts", "*.py"),
-                               ("scripts", "*.sh"), ("scripts", "*.ps1"), ("docs", "*.md"),
+                               ("scripts", "*.sh"), ("scripts", "*.ps1"), ("docs", "*.md"), ("docs", "*.txt"),
                                (".github/workflows", "*.yml"), ("packaging/windows", "*.iss"),
                                ("assets", "subslab.*")):
         files.extend((ROOT / directory).glob(pattern))

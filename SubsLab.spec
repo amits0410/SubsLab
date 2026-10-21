@@ -58,7 +58,7 @@ if is_darwin:
         icon=app_icon,
         bundle_identifier=BUNDLE_IDENTIFIER,
         info_plist={
-            "LSMinimumSystemVersion": "12.0", "NSHighResolutionCapable": True,
+            "LSMinimumSystemVersion": "14.0", "NSHighResolutionCapable": True,
             "CFBundleName": APP_NAME, "CFBundleDisplayName": APP_NAME,
             "CFBundleShortVersionString": APP_VERSION, "CFBundleVersion": APP_VERSION,
         },

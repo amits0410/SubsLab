@@ -17,7 +17,18 @@ if [[ -n "$sign_identity" ]]; then
   codesign --verify --deep --strict --verbose=2 "dist/SubsLab.app"
 fi
 
-hdiutil create -volname "SubsLab" -srcfolder "dist/SubsLab.app" -ov -format UDZO "dist/SubsLab.dmg"
+dmg_temp_root="${TMPDIR:-/tmp}"
+dmg_staging="$(mktemp -d "$dmg_temp_root/subslab-dmg.XXXXXX")"
+cleanup_dmg_staging() {
+  if [[ -n "$dmg_staging" && "$dmg_staging" == "$dmg_temp_root/subslab-dmg."* ]]; then
+    rm -rf -- "$dmg_staging"
+  fi
+}
+trap cleanup_dmg_staging EXIT
+ditto "dist/SubsLab.app" "$dmg_staging/SubsLab.app"
+ln -s /Applications "$dmg_staging/Applications"
+cp docs/MACOS_INSTALLATION.txt "$dmg_staging/READ-ME-FIRST.txt"
+hdiutil create -volname "SubsLab" -srcfolder "$dmg_staging" -ov -format UDZO "dist/SubsLab.dmg"
 hdiutil verify "dist/SubsLab.dmg"
 (cd dist && shasum -a 256 SubsLab.dmg > SHA256.txt)
 

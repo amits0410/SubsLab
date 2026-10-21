@@ -4,15 +4,20 @@ SubsLab is a privacy-first desktop subtitle editor and local transcription tool.
 
 The application icon is provided in PNG, Windows ICO, and macOS ICNS formats under `assets/`; both development launches and packaged builds use the same branding.
 
-## Install on Windows
+## Download and install
 
-Download **[SubsLab-Setup.exe from the latest release](https://github.com/amits0410/SubsLab/releases/latest/download/SubsLab-Setup.exe)**, run the installer, then open **SubsLab** from the Start menu. Supports Windows 10/11 on 64-bit Intel/AMD PCs; Python and a GPU are not required.
+| Your computer | Download | Installation |
+| --- | --- | --- |
+| Windows 10/11, 64-bit Intel/AMD | [SubsLab-Setup.exe](https://github.com/amits0410/SubsLab/releases/latest/download/SubsLab-Setup.exe) | Run the installer, then open SubsLab from Start. |
+| Apple Silicon Mac (M1 or newer), macOS 14+ | [SubsLab-macOS-AppleSilicon.dmg](https://github.com/amits0410/SubsLab/releases/latest/download/SubsLab-macOS-AppleSilicon.dmg) | Open the DMG, drag SubsLab to Applications, then launch it from Applications. |
+
+Python, programming tools, and a GitHub account are not required to install these downloads. Intel Macs are not supported.
 
 On first launch, open **Tools → Local AI models** and install the model you need. This one-time download requires internet; transcription with installed models works offline.
 
-The installer is currently unsigned, so Windows may display an unknown-publisher or SmartScreen warning. Only proceed if you expected the file and trust its source. The release includes a SHA-256 checksum.
+These builds are not signed with a Windows publisher certificate or Apple Developer ID. Windows may show an unknown-publisher warning; macOS may require first-launch approval. Only proceed if you expected the download and trust its source. The release includes separate Windows and macOS SHA-256 checksums.
 
-See the [Windows installation guide](docs/WINDOWS_INSTALLATION.md) for full instructions. **Code → Download ZIP** and the release's **Source code** downloads contain developer files, not the Windows installer. Apple Silicon Mac users should follow the [macOS guide](docs/MACOS_SETUP_GUIDE.md).
+See the [Windows installation guide](docs/WINDOWS_INSTALLATION.md) or [Mac installation guide](docs/MACOS_INSTALLATION.md) for the steps for your computer. **Code → Download ZIP** and the release's **Source code** downloads contain developer files, not an installer.
 
 ## Features
 
@@ -96,7 +101,7 @@ Build the Windows application directory with:
 
 The script intentionally fails unless the `windows-ai` extra is installed, preventing a release that opens but cannot transcribe. Pass `-Installer` when Inno Setup's `iscc` is available. Set `SUBSLAB_SIGN_CERT_SHA1` to sign the executable and installer with `signtool`.
 
-Windows output is `dist/SubsLab/SubsLab.exe`; the optional installer is `dist/SubsLab-Setup.exe`. The manually triggered **Build SubsLab macOS DMG** GitHub Actions workflow uploads `SubsLab-macOS-arm64` containing `SubsLab.dmg` and its checksum. Historical builds are kept separately.
+Windows output is `dist/SubsLab/SubsLab.exe`; the optional installer is `dist/SubsLab-Setup.exe`. The **Release SubsLab for macOS** GitHub Actions workflow builds and verifies a drag-to-Applications DMG and publishes `SubsLab-macOS-AppleSilicon.dmg` alongside the Windows installer in the matching release. It can also be run manually from Actions. Historical builds are kept separately.
 
 On Apple Silicon, run `scripts/build_macos.sh`. It likewise checks for both the MLX and CTranslate2 runtimes before creating an application bundle and DMG. Set `SUBSLAB_CODESIGN_IDENTITY` for Developer ID signing and `SUBSLAB_NOTARY_PROFILE` for notarization and stapling. Unsigned local development builds need neither variable.
 

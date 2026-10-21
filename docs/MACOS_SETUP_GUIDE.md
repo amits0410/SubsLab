@@ -1,5 +1,7 @@
 # SubsLab for macOS
 
+**Installing the finished app? Start with the [Mac installation guide](MACOS_INSTALLATION.md).** Download the DMG from [Releases](https://github.com/amits0410/SubsLab/releases/latest); building the app yourself is optional. The instructions below are for developers building, signing, or sharing their own copy.
+
 This guide covers building SubsLab on an Apple Silicon Mac, sending it to another Mac user, and installing it. The current macOS release supports Apple Silicon only (M1, M2, M3, M4, or newer), not Intel Macs.
 
 ## What you send
@@ -21,7 +23,7 @@ Apple explains Developer ID distribution and notarization at [Distributing softw
 
 ## Requirements for the build Mac
 
-- An Apple Silicon Mac running macOS 12 or later.
+- An Apple Silicon Mac running macOS 14 Sonoma or later.
 - Python 3.11, 3.12, or 3.13. Python 3.12 is recommended.
 - Xcode Command Line Tools.
 - Approximately 8 GB of free working space for Python packages and build output.
@@ -140,7 +142,7 @@ The section below can be copied directly into a message to the Mac user.
 ## System requirements
 
 - Apple Silicon Mac: M1, M2, M3, M4, or newer.
-- macOS 12 or later.
+- macOS 14 Sonoma or later.
 - At least 4 GB of free space; more may be needed for multiple offline AI models.
 - Internet access for the initial model installation. Once a model is installed, transcription with that model works offline.
 
@@ -148,7 +150,7 @@ Intel Macs are not supported by this version.
 
 ## Install SubsLab
 
-1. Download `SubsLab.dmg`.
+1. Download `SubsLab-macOS-AppleSilicon.dmg` from [Releases](https://github.com/amits0410/SubsLab/releases/latest), or obtain `SubsLab.dmg` directly from the developer.
 2. If the sender supplied a SHA-256 value, open Terminal and verify the download:
 
    ```bash
@@ -179,7 +181,7 @@ If macOS says the app “will damage your computer,” moves it to Trash, or say
 
 ## Install an offline transcription model
 
-1. Open **Models** in SubsLab.
+1. Open **Tools → Local AI models** in SubsLab.
 2. Install the model needed for the intended workflow.
 3. Keep the app open until download and SHA-256 verification finish.
 
